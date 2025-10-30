@@ -236,7 +236,7 @@ public class LoginView {
             try {
                 // Open Google OAuth in browser
                 String authUrl = "https://accounts.google.com/o/oauth2/v2/auth?" +
-                    "client_id=104342760903-57g6sbvtievmfd3mrv3uhp1pbhiicfrk.apps.googleusercontent.com" +
+                    "client_id=YOUR_GOOGLE_CLIENT_ID" +
                     "&redirect_uri=http://localhost:8888" +
                     "&response_type=id_token" +
                     "&scope=openid%20email%20profile" +
@@ -442,7 +442,7 @@ public class LoginView {
             try {
                 // Open Google OAuth in browser
                 String authUrl = "https://accounts.google.com/o/oauth2/v2/auth?" +
-                    "client_id=104342760903-57g6sbvtievmfd3mrv3uhp1pbhiicfrk.apps.googleusercontent.com" +
+                    "client_id=YOUR_GOOGLE_CLIENT_ID" +
                     "&redirect_uri=http://localhost:8888" +
                     "&response_type=id_token" +
                     "&scope=openid%20email%20profile" +
