@@ -1,0 +1,5 @@
+***REMOVED***
+regex:[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com=>REDACTED_GOOGLE_CLIENT_ID
+regex:AIza[0-9A-Za-z\-_]{35}=>REDACTED_GOOGLE_KEY
+regex:googleusercontent\.com/[A-Za-z0-9\-\._]+=>REDACTED_GOOGLE
+regex:mongodb\+srv://[^@]+@=>mongodb+srv://REDACTED@

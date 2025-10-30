@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediMate - Your Personal Health Companion</title>
+    <link rel="stylesheet" href="/css/styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <!-- Login/Register Screen -->
+    <div id="auth-screen" class="screen active">
+        <div class="auth-container">
+            <a href="/landing.html" class="back-to-home">← Back to Home</a>
+            <div class="auth-card">
+                <div class="auth-header">
+                    <h1>💊 MediMate</h1>
+                    <p>Your Personal Health Companion</p>
+                </div>
+                
+                <div class="auth-tabs">
+                    <button class="tab-btn active" onclick="switchAuthTab('login')">Login</button>
+                    <button class="tab-btn" onclick="switchAuthTab('register')">Register</button>
+                </div>
+                
+                <!-- Login Form -->
+                <form id="login-form" class="auth-form active">
+                    <input type="text" id="login-username" placeholder="Username" required>
+                    <input type="password" id="login-password" placeholder="Password" required>
+                    <button type="submit" class="btn-primary">Login</button>
+                    <div id="login-status" class="status-message"></div>
+                </form>
+                
+                <!-- Register Form -->
+                <form id="register-form" class="auth-form">
+                    <input type="text" id="register-fullname" placeholder="Full Name" required>
+                    <input type="email" id="register-email" placeholder="Email" required>
+                    <input type="text" id="register-username" placeholder="Username (min 3 characters)" required minlength="3">
+                    <input type="password" id="register-password" placeholder="Password (min 6 characters)" required minlength="6">
+                    <input type="password" id="register-confirm-password" placeholder="Confirm Password" required>
+                    <select id="register-role" required>
+                        <option value="">Select Role</option>
+                        <option value="Elderly User">Elderly User</option>
+                        <option value="Caregiver">Caregiver</option>
+                    </select>
+                    <button type="submit" class="btn-primary">Create Account</button>
+                    <div id="register-status" class="status-message"></div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dashboard Screen -->
+    <div id="dashboard-screen" class="screen">
+        <!-- Top Navigation -->
+        <nav class="top-nav">
+            <div class="nav-left">
+                <h2>💊 MediMate</h2>
+            </div>
+            <div class="nav-right">
+                <input type="search" placeholder="🔍 Search..." class="search-bar">
+                <div class="notif-container" style="position:relative; display:inline-block;">
+                    <button class="icon-btn" onclick="toggleNotificationsApp()" style="background:none; border:none; font-size:24px; cursor:pointer; position:relative; padding:8px;">
+                        🔔
+                        <span id="notif-badge-app" class="notification-badge" style="display:none; position:absolute; top:4px; right:4px; background:#ef4444; color:white; border-radius:50%; min-width:18px; height:18px; font-size:11px; font-weight:bold; padding:0 4px; display:flex; align-items:center; justify-content:center;">0</span>
+                    </button>
+                    <div id="notif-dropdown-app" style="display:none; position:absolute; right:0; top:52px; background:white; border:1px solid #e5e7eb; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.15); width:340px; max-height:60vh; overflow:auto; padding:12px; z-index:1000;"></div>
+                </div>
+                <button class="theme-toggle" onclick="toggleTheme()">🌙</button>
+                <button class="btn-logout" onclick="logout()">Logout</button>
+            </div>
+        </nav>
+
+        <div class="dashboard-container">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <button class="nav-item active" onclick="switchView('dashboard')">
+                    <span>📊</span> Dashboard
+                </button>
+                <button class="nav-item" onclick="switchView('medications')">
+                    <span>💊</span> Medications
+                </button>
+                <button class="nav-item" onclick="switchView('wellness')">
+                    <span>🌿</span> Wellness
+                </button>
+                <button class="nav-item" onclick="switchView('analytics')">
+                    <span>📈</span> Analytics
+                </button>
+                <button class="nav-item" onclick="switchView('insights')">
+                    <span>🤖</span> AI Insights
+                </button>
+                <button class="nav-item" onclick="switchView('emergency')">
+                    <span>🚨</span> Emergency
+                </button>
+                <button class="nav-item" onclick="switchView('settings')">
+                    <span>⚙️</span> Settings
+                </button>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="main-content">
+                <!-- Dashboard View -->
+                <div id="dashboard-view" class="view active">
+                    <h1>Welcome to MediMate! 👋</h1>
+                    <div class="stats-grid" id="stats-grid"></div>
+                    <div class="charts-row">
+                        <div class="card">
+                            <h3>📊 Mood Trends (7 Days)</h3>
+                            <canvas id="mood-chart"></canvas>
+                        </div>
+                        <div class="card">
+                            <h3>💊 Upcoming Medications</h3>
+                            <div id="upcoming-meds"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Medications View -->
+                <div id="medications-view" class="view">
+                    <h1>💊 Medications</h1>
+                    <div class="card">
+                        <h3>📋 Your Doses</h3>
+                        <p style="margin:8px 0 12px;color:#64748b">Medications are assigned by your caretaker. Mark each dose when you take it.</p>
+                        <div id="medications-list"></div>
+                    </div>
+                </div>
+
+                <!-- Wellness View -->
+                <div id="wellness-view" class="view">
+                    <h1>🌿 Wellness Logs</h1>
+                    <div class="card form-card">
+                        <h3>Log Your Wellness</h3>
+                        <form id="wellness-form">
+                            <select id="wellness-mood" required>
+                                <option value="">Select Mood</option>
+                                <option value="Excellent">😄 Excellent</option>
+                                <option value="Good">😊 Good</option>
+                                <option value="Okay">🙂 Okay</option>
+                                <option value="Low">😟 Low</option>
+                                <option value="Very Low">😢 Very Low</option>
+                                <option value="Anxious">😔 Anxious</option>
+                                <option value="Tired">😴 Tired</option>
+                            </select>
+                            <label>⚡ Energy Level: <span id="energy-value">5</span></label>
+                            <input type="range" id="wellness-energy" min="1" max="10" value="5" oninput="document.getElementById('energy-value').textContent=this.value">
+                            <textarea id="wellness-notes" placeholder="Notes (optional)" rows="3"></textarea>
+                            <button type="submit" class="btn-primary">Log Wellness</button>
+                        </form>
+                    </div>
+                    <div class="card">
+                        <h3>📅 Wellness History</h3>
+                        <div id="wellness-list"></div>
+                    </div>
+                </div>
+
+                <!-- Analytics View -->
+                <div id="analytics-view" class="view">
+                    <h1>📈 Analytics</h1>
+                    <div class="card" id="analytics-summary"></div>
+                </div>
+
+                <!-- AI Insights View -->
+                <div id="insights-view" class="view">
+                    <h1>🤖 AI Wellness Insights</h1>
+                    <div id="ai-insights-container"></div>
+                </div>
+
+                <!-- Emergency Services View -->
+                <div id="emergency-view" class="view">
+                    <h1>🚨 Emergency Services</h1>
+                    <div class="emergency-alert card" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); color: white;">
+                        <h2>⚠️ In Case of Emergency</h2>
+                        <p style="font-size: 18px; margin: 10px 0;">Call emergency services immediately if you experience:</p>
+                        <ul style="text-align: left; margin: 10px 0;">
+                            <li>Chest pain or difficulty breathing</li>
+                            <li>Severe bleeding or injuries</li>
+                            <li>Loss of consciousness</li>
+                            <li>Severe allergic reactions</li>
+                        </ul>
+                        <button onclick="window.location.href='tel:112'" class="btn-emergency">📞 Call 112 (Emergency)</button>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>🏥 Nearby Emergency Services</h3>
+                        <div id="emergency-services-list"></div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>📞 Important Helplines (India)</h3>
+                        <div class="contact-list">
+                            <div class="contact-item">
+                                <span class="contact-icon">🚑</span>
+                                <div>
+                                    <strong>Emergency Services</strong>
+                                    <p>112 - Police, Fire, Ambulance (24/7)</p>
+                                </div>
+                            </div>
+                            <div class="contact-item">
+                                <span class="contact-icon">🚑</span>
+                                <div>
+                                    <strong>Ambulance</strong>
+                                    <p>102 / 108 - Free Ambulance Service (24/7)</p>
+                                </div>
+                            </div>
+                            <div class="contact-item">
+                                <span class="contact-icon">👮</span>
+                                <div>
+                                    <strong>Police</strong>
+                                    <p>100 - Police Emergency (24/7)</p>
+                                </div>
+                            </div>
+                            <div class="contact-item">
+                                <span class="contact-icon">🔥</span>
+                                <div>
+                                    <strong>Fire Brigade</strong>
+                                    <p>101 - Fire Emergency (24/7)</p>
+                                </div>
+                            </div>
+                            <div class="contact-item">
+                                <span class="contact-icon">🏥</span>
+                                <div>
+                                    <strong>National Health Helpline</strong>
+                                    <p>104 - Health Advice (24/7)</p>
+                                </div>
+                            </div>
+                            <div class="contact-item">
+                                <span class="contact-icon">👩</span>
+                                <div>
+                                    <strong>Women Helpline</strong>
+                                    <p>1091 / 181 - Women in Distress (24/7)</p>
+                                </div>
+                            </div>
+                            <div class="contact-item">
+                                <span class="contact-icon">👶</span>
+                                <div>
+                                    <strong>Child Helpline</strong>
+                                    <p>1098 - Child Protection (24/7)</p>
+                                </div>
+                            </div>
+                            <div class="contact-item">
+                                <span class="contact-icon">🧠</span>
+                                <div>
+                                    <strong>Mental Health Support</strong>
+                                    <p>9152987821 - COOJ Mental Health (24/7)</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Settings View -->
+                <div id="settings-view" class="view">
+                    <h1>⚙️ Settings</h1>
+                    <div class="card">
+                        <h3>Profile</h3>
+                        <div class="form-grid">
+                            <input id="set-fullname" placeholder="Full Name">
+                            <input id="set-email" placeholder="Email">
+                            <input id="set-phone" placeholder="Phone">
+                            <input id="set-dob" placeholder="DOB (YYYY-MM-DD)">
+                        </div>
+                        <div class="form-grid" style="margin-top:12px">
+                            <input id="set-address" placeholder="Address">
+                        </div>
+                        <div style="margin-top:12px">
+                            <button class="btn-primary" onclick="saveProfileSettings()">Save Profile</button>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>Theme</h3>
+                        <button onclick="toggleTheme()" class="btn-secondary">Toggle Dark Mode</button>
+                    </div>
+                </div>
+            </main>
+
+        </div>
+    </div>
+
+    <script src="/js/app.js?v=20251030-12"></script>
+</body>
+</html>

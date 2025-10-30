@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediMate Caretaker Dashboard</title>
+    <link rel="stylesheet" href="/css/caretaker.css?v=20251029-1">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <!-- Top Navigation Bar -->
+    <nav class="top-navbar">
+        <div class="nav-left">
+            <h1>💊 MediMate</h1>
+            <span class="nav-subtitle">Caretaker Portal</span>
+        </div>
+        <div class="nav-center">
+            <input type="search" placeholder="🔍 Search patients..." class="search-input" id="patient-search">
+        </div>
+        <div class="nav-right">
+            <div class="notif-container" style="position:relative;">
+            <button class="icon-btn" onclick="toggleNotifications()">
+                <span id="notif-badge" class="notification-badge" style="display:none">0</span>
+                🔔
+            </button>
+            <div id="notif-dropdown" style="display:none; position:absolute; right:0; top:52px; background: var(--card-bg); border:1px solid var(--border); border-radius:12px; box-shadow: var(--shadow); width: 340px; max-height: 60vh; overflow:auto; padding:12px;">
+            </div>
+            </div>
+            <button class="icon-btn" onclick="toggleTheme()">🌙</button>
+            <div class="user-profile">
+                <img id="user-avatar" src="" alt="Profile">
+                <div>
+                    <strong id="user-display-name">Caretaker</strong>
+                    <small id="user-role">Caretaker</small>
+                </div>
+            </div>
+            <button class="btn-logout" onclick="logout()">Logout</button>
+        </div>
+    </nav>
+
+    <!-- Main Container -->
+    <div class="dashboard-container">
+        <!-- Left Sidebar -->
+        <aside class="sidebar">
+            <button class="sidebar-item active" onclick="switchTab('dashboard')">
+                <span class="icon">📊</span>
+                <span>Dashboard</span>
+            </button>
+            <button class="sidebar-item" onclick="switchTab('patients')">
+                <span class="icon">👥</span>
+                <span>Patients</span>
+            </button>
+            <button class="sidebar-item" onclick="switchTab('alerts')">
+                <span class="icon">🔔</span>
+                <span>Alerts</span>
+                <span class="alert-count">5</span>
+            </button>
+            <button class="sidebar-item" onclick="switchTab('reports')">
+                <span class="icon">📄</span>
+                <span>Reports</span>
+            </button>
+            <button class="sidebar-item" onclick="switchTab('messages')">
+                <span class="icon">💬</span>
+                <span>Messages</span>
+            </button>
+            <button class="sidebar-item" onclick="switchTab('settings')">
+                <span class="icon">⚙️</span>
+                <span>Settings</span>
+            </button>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Dashboard Tab -->
+            <div id="dashboard-tab" class="tab-content active">
+                <div class="content-header">
+                    <h2>Dashboard Overview</h2>
+                    <div class="header-actions">
+                        <select class="filter-select">
+                            <option>All Patients</option>
+                            <option>Critical Only</option>
+                            <option>Needs Attention</option>
+                            <option>On Track</option>
+                        </select>
+                        <button class="btn-primary" onclick="exportReport()">📥 Export Report</button>
+                    </div>
+                </div>
+
+                <!-- Summary Stats -->
+                <div class="stats-grid">
+                    <div class="stat-card patients">
+                        <div class="stat-icon" style="background: #3b82f6;">👥</div>
+                        <div class="stat-info">
+                            <h3>0</h3>
+                            <p>Total Patients</p>
+                        </div>
+                    </div>
+                    <div class="stat-card active">
+                        <div class="stat-icon" style="background: #10b981;">✅</div>
+                        <div class="stat-info">
+                            <h3>0</h3>
+                            <p>Active Patients</p>
+                        </div>
+                    </div>
+                    <div class="stat-card appointments">
+                        <div class="stat-icon" style="background: #f59e0b;">📅</div>
+                        <div class="stat-info">
+                            <h3>0</h3>
+                            <p>Today's Appointments</p>
+                        </div>
+                    </div>
+                    <div class="stat-card tasks">
+                        <div class="stat-icon" style="background: #ef4444;">✅</div>
+                        <div class="stat-info">
+                            <h3>0</h3>
+                            <p>Pending Tasks</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Patient Cards Grid -->
+                <div class="section-header">
+                    <h3>Patient Monitoring</h3>
+                    <div class="view-toggle">
+                        <button class="toggle-btn active" onclick="setView('grid')">⊞ Grid</button>
+                        <button class="toggle-btn" onclick="setView('list')">☰ List</button>
+                    </div>
+                </div>
+                <div id="patients-grid" class="patients-grid"></div>
+            </div>
+
+            <!-- Patients Tab -->
+            <div id="patients-tab" class="tab-content">
+                <div class="content-header">
+                    <h2>My Patients</h2>
+                    <div></div>
+                </div>
+                
+                <!-- Claim Patient Card -->
+                <div class="card" style="margin-bottom:20px; padding:24px;">
+                    <h3 style="font-size:20px; margin-bottom:12px;">🔗 Claim Existing Patient</h3>
+                    <div class="form-grid">
+                        <input id="cf-name" placeholder="Patient Name (approx)">
+                        <input id="cf-email" placeholder="Email (exact)">
+                        <input id="cf-contact" placeholder="Phone (exact)">
+                    </div>
+                    <div style="margin-top:12px;">
+                        <button class="btn-secondary" onclick="claimPatientFromForm()">Claim Patient</button>
+                    </div>
+                </div>
+
+                <!-- Patients List -->
+                <div id="patients-list-detailed"></div>
+
+                <!-- Modals -->
+                <!-- Assign Medication Modal -->
+                <div id="assign-med-modal" class="modal" style="display:none;">
+                    <div class="modal-content">
+                        <h3>💊 Assign Medication</h3>
+                        <input type="hidden" id="am-patient-id">
+                        <input type="hidden" id="am-patient-email">
+                        <p style="color:#64748b; margin-bottom:12px;">Patient: <strong id="am-patient-name"></strong></p>
+                        <div class="form-grid">
+                            <input id="am-name" placeholder="Medicine Name">
+                            <input id="am-dosage" placeholder="Dosage (e.g., 10mg)">
+                        </div>
+                        <div style="margin-top:16px;">
+                            <label style="display:block; margin-bottom:8px; font-weight:600; color:#1e293b;">⏰ Medication Times:</label>
+                            <div id="time-slots-container" style="display:flex; flex-direction:column; gap:8px;">
+                                <div class="time-slot" style="display:flex; gap:8px; align-items:center;">
+                                    <input type="number" min="1" max="12" placeholder="Hour" style="width:70px;" class="time-hour" value="8">
+                                    <input type="number" min="0" max="59" placeholder="Min" style="width:70px;" class="time-minute" value="0">
+                                    <select class="time-period" style="width:80px;">
+                                        <option value="AM">AM</option>
+                                        <option value="PM">PM</option>
+                                    </select>
+                                    <button type="button" onclick="removeTimeSlot(this)" style="background:#ef4444; color:white; border:none; padding:6px 12px; border-radius:6px; cursor:pointer;">Remove</button>
+                                </div>
+                            </div>
+                            <button type="button" onclick="addTimeSlot()" style="margin-top:8px; background:#3b82f6; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer;">+ Add Time</button>
+                        </div>
+                        <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end;">
+                            <button class="btn-secondary" onclick="closeAssignMedModal()">Cancel</button>
+                            <button class="btn-primary" onclick="saveAssignMed()">Assign</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- View Medications Modal -->
+                <div id="view-meds-modal" class="modal" style="display:none;">
+                    <div class="modal-content" style="max-width:700px;">
+                        <h3>💊 Medications</h3>
+                        <p style="color:#64748b; margin-bottom:12px;">Patient: <strong id="vm-patient-name"></strong></p>
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Dosage</th>
+                                    <th>Schedule</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="vm-tbody">
+                                <tr><td colspan="4">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                        <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+                            <button class="btn-secondary" onclick="closeViewMedsModal()">Close</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Edit Medication Modal -->
+                <div id="edit-med-modal" class="modal" style="display:none;">
+                    <div class="modal-content">
+                        <h3>✏️ Edit Medication</h3>
+                        <input type="hidden" id="em-id">
+                        <div class="form-grid">
+                            <input id="em-name" placeholder="Medicine Name">
+                            <input id="em-dosage" placeholder="Dosage">
+                            <input id="em-schedule" placeholder="Schedule (e.g., 08:00, 20:00)">
+                        </div>
+                        <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+                            <button class="btn-secondary" onclick="closeEditMedModal()">Cancel</button>
+                            <button class="btn-primary" onclick="saveEditedMedication()">Save</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Add Appointment Modal -->
+                <div id="add-apt-modal" class="modal" style="display:none;">
+                    <div class="modal-content">
+                        <h3>📅 Add Appointment</h3>
+                        <input type="hidden" id="apt-patient-id">
+                        <p style="color:#64748b; margin-bottom:12px;">Patient: <strong id="apt-patient-name-display"></strong></p>
+                        <div class="form-grid">
+                            <input id="apt-date" type="date">
+                            <input id="apt-time" type="time">
+                            <select id="apt-type">
+                                <option value="Checkup">Checkup</option>
+                                <option value="Follow-up">Follow-up</option>
+                                <option value="Emergency">Emergency</option>
+                            </select>
+                        </div>
+                        <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+                            <button class="btn-secondary" onclick="closeAddAptModal()">Cancel</button>
+                            <button class="btn-primary" onclick="saveAppointmentForPatient()">Save</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Add Task Modal -->
+                <div id="add-task-modal" class="modal" style="display:none;">
+                    <div class="modal-content">
+                        <h3>✅ Add Task</h3>
+                        <input type="hidden" id="task-patient-id">
+                        <p style="color:#64748b; margin-bottom:12px;">Patient: <strong id="task-patient-name-display"></strong></p>
+                        <div class="form-grid">
+                            <input id="task-title" placeholder="Task Title" style="grid-column:span 2;">
+                            <select id="task-priority">
+                                <option value="High">High</option>
+                                <option value="Medium" selected>Medium</option>
+                                <option value="Low">Low</option>
+                            </select>
+                            <input id="task-due" type="date">
+                        </div>
+                        <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+                            <button class="btn-secondary" onclick="closeAddTaskModal()">Cancel</button>
+                            <button class="btn-primary" onclick="saveTaskForPatient()">Save</button>
+                        </div>
+                    </div>
+                </div>
+
+                <table class="data-table" style="display:none;">
+                    <thead>
+                        <tr>
+                            <th>Task</th>
+                            <th>Patient</th>
+                            <th>Priority</th>
+                            <th>Due Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tasks-tbody"></tbody>
+                </table>
+            </div>
+
+            <!-- Alerts Tab -->
+            <div id="alerts-tab" class="tab-content">
+                <div class="content-header">
+                    <h2>Alerts & Notifications</h2>
+                    <div>
+                        <button class="btn-secondary" onclick="markAllRead()">Mark All Read</button>
+                        <button class="btn-primary" style="margin-left:8px;" onclick="openNotifModal()">+ New Notification</button>
+                    </div>
+                </div>
+                <div id="alerts-list" class="alerts-list"></div>
+            </div>
+
+            <!-- Reports Tab -->
+            <div id="reports-tab" class="tab-content">
+                <div class="content-header">
+                    <h2>Reports & Analytics</h2>
+                    <button class="btn-primary" onclick="generateReport()">Generate Report</button>
+                </div>
+                <div id="reports-container" class="reports-container"></div>
+            </div>
+
+            <!-- Messages Tab -->
+            <div id="messages-tab" class="tab-content">
+                <div class="content-header">
+                    <h2>Messages</h2>
+                </div>
+                <div style="display:grid; grid-template-columns:300px 1fr; gap:20px; height:600px;">
+                    <div class="card" style="overflow-y:auto;">
+                        <h3>Patients</h3>
+                        <div id="msg-patients-list"></div>
+                    </div>
+                    <div class="card" style="display:flex; flex-direction:column;">
+                        <div id="msg-conversation" style="flex:1; overflow-y:auto; padding:12px; border:1px solid #e5e7eb; border-radius:8px; margin-bottom:12px;">
+                            <p style="color:#94a3b8; text-align:center; padding:40px 0;">Select a patient to start messaging</p>
+                        </div>
+                        <div style="display:flex; gap:8px;">
+                            <input id="msg-input" type="text" placeholder="Type your message..." style="flex:1;" disabled onkeypress="if(event.key==='Enter') sendMessageToSelected()">
+                            <button class="btn-primary" onclick="sendMessageToSelected()" disabled id="msg-send-btn">Send</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div id="settings-tab" class="tab-content">
+                <div class="content-header">
+                    <h2>Settings</h2>
+                </div>
+                <div class="settings-container">
+                    <div class="settings-card">
+                        <h3>Notification Preferences</h3>
+                        <div class="setting-item">
+                            <label>
+                                <input type="checkbox" checked> Critical alerts
+                            </label>
+                        </div>
+                        <div class="setting-item">
+                            <label>
+                                <input type="checkbox" checked> Missed medications
+                            </label>
+                        </div>
+                        <div class="setting-item">
+                            <label>
+                                <input type="checkbox"> Low mood alerts
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Right Panel - Notifications -->
+        <aside class="right-panel">
+            <div class="panel-section">
+                <h3>🔔 Recent Alerts</h3>
+                <div id="recent-alerts" class="recent-alerts"></div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- Generic Modal -->
+    <div id="generic-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <h3 id="generic-title">Details</h3>
+            <div id="generic-body"></div>
+            <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+                <button class="btn-primary" onclick="closeGenericModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Modal -->
+    <div id="confirm-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <h3>Confirm Action</h3>
+            <p id="confirm-message">Are you sure?</p>
+            <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+                <button class="btn-secondary" id="confirm-cancel">Cancel</button>
+                <button class="btn-danger" id="confirm-ok">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Compose Message Modal -->
+    <div id="msg-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <h3>New Message</h3>
+            <div class="form-grid">
+                <input id="msg-patient-id" placeholder="Patient ID">
+                <input id="msg-patient-name" placeholder="Patient Name">
+                <textarea id="msg-content" placeholder="Type your message..."></textarea>
+            </div>
+            <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+                <button class="btn-secondary" onclick="closeMsgModal()">Cancel</button>
+                <button class="btn-primary" onclick="sendMessageFromModal()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- New Notification Modal -->
+    <div id="notif-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <h3>New Notification</h3>
+            <div class="form-grid">
+                <select id="notif-type">
+                    <option value="MEDICATION">Medication</option>
+                    <option value="STREAK">Streak</option>
+                    <option value="ALERT">Alert</option>
+                </select>
+                <input id="notif-title" placeholder="Title">
+                <input id="notif-icon" placeholder="Icon (e.g., 🔔)">
+                <input id="notif-color" placeholder="Color (e.g., #f59e0b)">
+                <textarea id="notif-message" placeholder="Message..."></textarea>
+            </div>
+            <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+                <button class="btn-secondary" onclick="closeNotifModal()">Cancel</button>
+                <button class="btn-primary" onclick="createNotificationFromModal()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" style="position:fixed; top:16px; right:16px; display:flex; flex-direction:column; gap:8px; z-index:9999;"></div>
+
+    <script src="/js/caretaker.js?v=20251030-13"></script>
+</body>
+</html>

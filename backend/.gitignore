@@ -1,0 +1,29 @@
+# Build outputs
+/target/
+/out/
+
+# IDE
+/.idea/
+/.vscode/
+/*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Env and secrets
+.env
+*.env
+backend.env
+
+# Local overrides (keep templates only)
+application-local.properties
+application-dev.properties
+
+# If you will provide config via env/secrets in prod, ignore this:
+# Uncomment the next line if you do NOT want to commit it:
+# src/main/resources/application.properties
