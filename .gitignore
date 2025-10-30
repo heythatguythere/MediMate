@@ -1,0 +1,31 @@
+@"
+# Build outputs
+/backend/target/
+/frontend/target/
+/out/
+
+# IDE
+/.idea/
+/.vscode/
+/*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Env and secrets
+.env
+backend/.env
+frontend/.env
+
+# Local overrides
+backend/src/main/resources/application-local.properties
+backend/src/main/resources/application-dev.properties
+
+# If using env in prod, you may ignore this:
+# backend/src/main/resources/application.properties
+"@ | Set-Content -Encoding UTF8 .gitignore
