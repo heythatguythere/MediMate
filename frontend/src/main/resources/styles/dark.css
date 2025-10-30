@@ -1,0 +1,12 @@
+.root { background-color: #0b1220; -fx-background-color: linear-gradient(to bottom right, #0b1220, #0f172a); }
+.label.title { font-size: 32px; -fx-font-size: 32px; -fx-text-fill: #93c5fd; font-weight: bold; -fx-font-weight: bold; }
+.card { background-color: #111827; -fx-background-color: #111827; -fx-background-radius: 16; -fx-effect: dropshadow(gaussian, rgba(2,6,23,0.6), 30,0,0,10); }
+.button { background-color: #3b82f6; -fx-background-color: #3b82f6; -fx-text-fill: white; -fx-background-radius: 8; -fx-padding: 10 20; }
+.button:hover { background-color: #2563eb; -fx-background-color: #2563eb; }
+.text-field, .password-field, .combo-box-base { -fx-background-radius: 8; background-color: #1f2937; -fx-background-color: #1f2937; -fx-text-fill: #e5e7eb; -fx-border-color: #374151; -fx-border-width: 1; -fx-border-radius: 8; -fx-padding: 8 12; }
+.text-field:focused, .password-field:focused, .combo-box-base:focused { -fx-border-color: #3b82f6; -fx-border-width: 2; }
+.status { -fx-text-fill: #f87171; -fx-font-size: 13px; }
+.tab-pane { background-color: transparent; -fx-background-color: transparent; }
+.tab-pane *.tab-header-area { background-color: transparent; -fx-background-color: transparent; }
+.tab { -fx-background-radius: 8 8 0 0; -fx-padding: 10 20; }
+.tab:selected { -fx-background-color: #1f2937; }
