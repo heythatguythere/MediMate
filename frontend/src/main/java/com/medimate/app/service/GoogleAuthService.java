@@ -20,7 +20,7 @@ import java.util.function.Consumer;
 
 public class GoogleAuthService {
     
-    private static final String CLIENT_ID = "104342760903-57g6sbvtievmfd3mrv3uhp1pbhiicfrk.apps.googleusercontent.com";
+    private static final String CLIENT_ID = "REDACTED_GOOGLE_CLIENT_ID";
     private static final String REDIRECT_URI = "http://localhost:8888/callback";
     private static final String BACKEND_URL = "http://localhost:8081";
     
