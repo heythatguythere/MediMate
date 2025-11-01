@@ -44,6 +44,12 @@
       <artifactId>google-api-services-oauth2</artifactId>
       <version>v2-rev20200213-2.0.0</version>
     </dependency>
+    <!-- Spring Boot Actuator for health checks -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+      <version>${spring.boot.version}</version>
+    </dependency>
   </dependencies>
   <build>
     <plugins>
