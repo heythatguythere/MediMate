@@ -1,5 +1,5 @@
-// API Configuration
-const API_BASE = 'http://localhost:8081/api';
+// API Configuration - Using relative URL to work in both local and production
+const API_BASE = '/api';
 let authToken = localStorage.getItem('authToken');
 
 // Initialize
