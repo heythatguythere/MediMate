@@ -56,7 +56,7 @@ public class MedicationCheckService {
             if (patient == null) continue;
             
             // Find the caretaker assigned to this patient
-            List<Patient> patientRecords = patientRepository.findByEmail(patient.getEmail());
+            List<Patient> patientRecords = patientRepository.findByEmailIgnoreCase(patient.getEmail());
             if (patientRecords.isEmpty()) {
                 patientRecords = patientRepository.findByContactNumber(patient.getUsername());
             }
