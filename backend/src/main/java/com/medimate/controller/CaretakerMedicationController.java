@@ -7,6 +7,7 @@ import com.medimate.repo.MedicationRepository;
 import com.medimate.repo.UserRepository;
 import com.medimate.repo.DoseEventRepository;
 import com.medimate.service.TokenService;
+import com.medimate.service.MedicationCheckService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,15 +21,18 @@ public class CaretakerMedicationController {
     private final MedicationRepository medicationRepository;
     private final UserRepository userRepository;
     private final DoseEventRepository doseRepo;
+    private final MedicationCheckService medicationCheckService;
 
     public CaretakerMedicationController(TokenService tokenService,
                                          MedicationRepository medicationRepository,
                                          UserRepository userRepository,
-                                         DoseEventRepository doseRepo) {
+                                         DoseEventRepository doseRepo,
+                                         MedicationCheckService medicationCheckService) {
         this.tokenService = tokenService;
         this.medicationRepository = medicationRepository;
         this.userRepository = userRepository;
         this.doseRepo = doseRepo;
+        this.medicationCheckService = medicationCheckService;
     }
 
     @PostMapping("/assign")
@@ -52,6 +56,10 @@ public class CaretakerMedicationController {
         m.setDosage(dosage);
         m.setSchedule(schedule);
         Medication saved = medicationRepository.save(m);
+        
+        // Create medication logs for today's scheduled times
+        medicationCheckService.createLogsForMedication(saved);
+        
         // Seed today's dose events from schedule times (HH:mm, comma-separated)
         try {
             java.time.LocalDate today = java.time.LocalDate.now();

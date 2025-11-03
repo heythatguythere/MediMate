@@ -146,7 +146,6 @@ document.addEventListener('DOMContentLoaded', () => {
     loadAppointments();
     loadTasks();
     loadNotifications();
-    loadRecentAlerts();
     initConfirmModal();
 
     // Patient quick search
@@ -970,33 +969,30 @@ async function loadNotifications() {
 function updateNotifBadge() {
     const unread = allNotifications.filter(n => !n.read).length;
     const badge = document.getElementById('notif-badge');
-    if (!badge) return;
-    if (unread > 0) {
-        badge.textContent = String(unread);
-        badge.style.display = 'inline-block';
-    } else {
-        badge.style.display = 'none';
+    const sidebarCount = document.getElementById('sidebar-alert-count');
+    
+    // Update top notification badge
+    if (badge) {
+        if (unread > 0) {
+            badge.textContent = String(unread);
+            badge.style.display = 'inline-block';
+        } else {
+            badge.style.display = 'none';
+        }
+    }
+    
+    // Update sidebar alert count
+    if (sidebarCount) {
+        if (unread > 0) {
+            sidebarCount.textContent = String(unread);
+            sidebarCount.style.display = 'inline-block';
+        } else {
+            sidebarCount.style.display = 'none';
+        }
     }
 }
 
-async function loadRecentAlerts() {
-    // Reuse notifications into right panel recent alerts - only show unread
-    if (allNotifications.length === 0) await loadNotifications();
-    const panel = document.getElementById('recent-alerts');
-    if (!panel) return;
-    const unreadNotifs = allNotifications.filter(n => !n.read);
-    if (unreadNotifs.length === 0) { panel.innerHTML = '<p class="empty-state">No unread alerts</p>'; return; }
-    panel.innerHTML = unreadNotifs.slice(0, 5).map(n => `
-        <div class="notification-item ${n.type === 'MEDICATION' ? '' : n.type === 'STREAK' ? 'warning' : 'critical'}" style="position:relative; padding-right:60px;">
-            <strong>${n.icon || '🔔'} ${n.title || n.type}</strong>
-            <p>${n.message || ''}</p>
-            <div style="position:absolute; top:8px; right:8px; display:flex; gap:4px;">
-                <button onclick="markCaretakerNotificationRead('${n.id}')" style="background:#3b82f6; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:11px;">Mark Read</button>
-                <button onclick="deleteNotification('${n.id}')" style="background:none; border:none; cursor:pointer; color:#94a3b8; font-size:18px;">×</button>
-            </div>
-        </div>
-    `).join('');
-}
+// Function removed - right panel no longer exists
 
 async function markCaretakerNotificationRead(id) {
     try {
@@ -1008,7 +1004,13 @@ async function markCaretakerNotificationRead(id) {
             const notif = allNotifications.find(n => n.id === id);
             if (notif) notif.read = true;
             updateNotifBadge();
-            loadRecentAlerts();
+            // Refresh the notification dropdown to show updated state
+            const dd = document.getElementById('notif-dropdown');
+            if (dd && dd.style.display === 'block') {
+                toggleNotifications(); // Close it
+                toggleNotifications(); // Reopen it with updated data
+            }
+            toast('Notification marked as read');
         }
     } catch (e) { console.error('markCaretakerNotificationRead error', e); }
 }
@@ -1021,7 +1023,6 @@ async function deleteNotification(id) {
         if (res.ok) {
             allNotifications = allNotifications.filter(n => n.id !== id);
             updateNotifBadge();
-            loadRecentAlerts();
         }
     } catch (e) { console.error('deleteNotification error', e); }
 }
@@ -1198,20 +1199,21 @@ function toggleNotifications() {
     if (dd.style.display === 'block') { dd.style.display = 'none'; return; }
     // Render notifications
     dd.innerHTML = `
-        <div class="notif-header">
-            <strong>Notifications</strong>
-            <button class="btn-secondary" style="padding:6px 10px;" onclick="markAllRead()">Mark all read</button>
+        <div class="notif-header" style="display:flex; justify-content:space-between; align-items:center; padding:12px; border-bottom:1px solid #e5e7eb;">
+            <strong style="font-size:16px;">Notifications</strong>
+            <button class="btn-secondary" style="padding:6px 10px; font-size:12px;" onclick="markAllRead()">Mark all read</button>
         </div>
-        <div class="notif-list">
+        <div class="notif-list" style="max-height:400px; overflow-y:auto;">
             ${allNotifications.length ? allNotifications.map(n=>`
-                <div class="notif-item ${n.read?'read':'unread'}">
-                    <div class="ni-icon">${n.icon || '🔔'}</div>
-                    <div class="ni-body">
-                        <strong>${n.title || n.type || 'Notification'}</strong>
-                        <p>${n.message || ''}</p>
+                <div class="notif-item ${n.read?'read':'unread'}" style="padding:12px; border-bottom:1px solid #e5e7eb; display:flex; gap:12px; align-items:start; ${n.read ? 'opacity:0.6;' : ''}">
+                    <div class="ni-icon" style="font-size:20px;">${n.icon || '🔔'}</div>
+                    <div class="ni-body" style="flex:1; min-width:0;">
+                        <strong style="display:block; margin-bottom:4px; font-size:14px;">${n.title || n.type || 'Notification'}</strong>
+                        <p style="margin:0; font-size:13px; color:#64748b;">${n.message || ''}</p>
                     </div>
+                    ${!n.read ? `<button onclick="markCaretakerNotificationRead('${n.id}')" style="background:#3b82f6; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:11px; white-space:nowrap;">Mark Read</button>` : ''}
                 </div>
-            `).join('') : '<div class="empty">No notifications</div>'}
+            `).join('') : '<div class="empty" style="padding:40px; text-align:center; color:#94a3b8;">No notifications</div>'}
         </div>`;
     dd.style.display = 'block';
 }
@@ -1564,7 +1566,6 @@ async function createNotificationFromModal() {
             toast('Notification created');
             closeNotifModal();
             await loadNotifications();
-            await loadRecentAlerts();
         } else toast('Failed to create notification', 'error');
     } catch { toast('Error creating notification', 'error'); }
 }
@@ -1576,7 +1577,6 @@ async function markAllRead() {
         if (res.ok) {
             allNotifications.forEach(n => n.read = true);
             updateNotifBadge();
-            loadRecentAlerts();
             toast('All notifications marked as read');
         } else {
             toast('Failed to mark as read', 'error');
