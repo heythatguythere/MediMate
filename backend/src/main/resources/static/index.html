@@ -276,6 +276,23 @@
         </div>
     </div>
 
-    <script src="/js/app.js?v=20251030-12"></script>
+    <script>
+        // Immediate auth check to prevent login screen flash
+        (function() {
+            const token = localStorage.getItem('authToken');
+            const userRole = localStorage.getItem('userRole');
+            const urlParams = new URLSearchParams(window.location.search);
+            const forceLogin = urlParams.get('login') !== null;
+            
+            if (token && !forceLogin) {
+                // Immediately show dashboard screen
+                document.addEventListener('DOMContentLoaded', function() {
+                    document.getElementById('auth-screen').classList.remove('active');
+                    document.getElementById('dashboard-screen').classList.add('active');
+                });
+            }
+        })();
+    </script>
+    <script src="/js/app.js?v=20251030-13"></script>
 </body>
 </html>

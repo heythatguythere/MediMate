@@ -211,6 +211,24 @@ async function handleRegister(e) {
 function logout() {
     authToken = null;
     localStorage.removeItem('authToken');
+    localStorage.removeItem('userRole');
+    localStorage.removeItem('username');
+    
+    // Clear notification polling
+    if (notificationPollInterval) {
+        clearInterval(notificationPollInterval);
+        notificationPollInterval = null;
+    }
+    
+    // Stop any ringing audio
+    stopRinging();
+    
+    // Remove ring modal if present
+    const ringModal = document.getElementById('ring-alert-modal');
+    if (ringModal) {
+        ringModal.remove();
+    }
+    
     document.getElementById('dashboard-screen').classList.remove('active');
     document.getElementById('auth-screen').classList.add('active');
 }
@@ -238,6 +256,8 @@ function switchView(viewName) {
     if (viewName === 'emergency') loadEmergencyServices();
     if (viewName === 'settings') loadProfileSettings();
 }
+
+let notificationPollInterval = null;
 
 async function loadDashboardData() {
     try {
@@ -279,8 +299,10 @@ async function loadDashboardData() {
         // Load notifications
         loadNotifications();
         
-        // Start polling for new notifications every 10 seconds
-        setInterval(loadNotifications, 10000);
+        // Start polling for new notifications every 10 seconds (only once)
+        if (!notificationPollInterval) {
+            notificationPollInterval = setInterval(loadNotifications, 10000);
+        }
         
     } catch (error) {
         console.error('Error loading dashboard:', error);
