@@ -100,7 +100,8 @@ async function handleLogin(e) {
                 if (data.role === 'Caregiver') {
                     window.location.href = '/caretaker';
                 } else {
-                    showDashboard();
+                    // Redirect elderly users to the proper dashboard page
+                    window.location.href = '/dashboard';
                 }
             }, 800);
         } else {
