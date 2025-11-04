@@ -193,7 +193,6 @@ document.addEventListener('DOMContentLoaded', () => {
     window.markCaretakerNotificationRead = markCaretakerNotificationRead;
     window.deleteNotification = deleteNotification;
     window.toggleNotifications = toggleNotifications;
-    window.markNotificationRead = markNotificationRead;
     window.markAllNotificationsRead = markAllNotificationsRead;
 });
 

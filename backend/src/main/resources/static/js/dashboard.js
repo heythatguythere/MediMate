@@ -309,6 +309,10 @@ function renderNotificationsDropdown() {
     `;
 }
 
+// Global variables for ring audio control
+let ringAudioContext = null;
+let ringInterval = null;
+
 function showRingAlert(notification) {
     // Create a prominent modal alert
     const alertDiv = document.createElement('div');
@@ -320,7 +324,10 @@ function showRingAlert(notification) {
             <div style="font-size:64px; margin-bottom:16px; animation:ringBell 0.5s infinite;">🔔</div>
             <h2 style="margin:0 0 8px; color:#1e293b; font-size:24px;">${notification.title}</h2>
             <p style="margin:0 0 24px; color:#64748b; font-size:16px;">${notification.message}</p>
-            <button onclick="dismissRingAlert('${notification.id}')" style="background:#f59e0b; color:white; border:none; padding:12px 32px; border-radius:8px; cursor:pointer; font-size:16px; font-weight:600;">OK, I'm Here!</button>
+            <div style="display:flex; gap:12px; justify-content:center;">
+                <button onclick="stopRinging()" style="background:#64748b; color:white; border:none; padding:12px 24px; border-radius:8px; cursor:pointer; font-size:16px; font-weight:600;">Stop Ring</button>
+                <button onclick="dismissRingAlert('${notification.id}')" style="background:#f59e0b; color:white; border:none; padding:12px 32px; border-radius:8px; cursor:pointer; font-size:16px; font-weight:600;">OK, I'm Here!</button>
+            </div>
         </div>
         <style>
             @keyframes ringBell {
@@ -336,56 +343,66 @@ function showRingAlert(notification) {
     
     document.body.appendChild(alertDiv);
     
-    // Play a beep sound (if browser supports it)
+    // Start continuous ringing audio
+    startRingingAudio();
+}
+
+function startRingingAudio() {
     try {
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const oscillator = audioContext.createOscillator();
-        const gainNode = audioContext.createGain();
+        ringAudioContext = new (window.AudioContext || window.webkitAudioContext)();
         
-        oscillator.connect(gainNode);
-        gainNode.connect(audioContext.destination);
+        // Function to play a single beep
+        function playBeep() {
+            const oscillator = ringAudioContext.createOscillator();
+            const gainNode = ringAudioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(ringAudioContext.destination);
+            
+            oscillator.frequency.value = 800; // 800 Hz tone
+            oscillator.type = 'sine';
+            
+            gainNode.gain.setValueAtTime(0.3, ringAudioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, ringAudioContext.currentTime + 0.4);
+            
+            oscillator.start(ringAudioContext.currentTime);
+            oscillator.stop(ringAudioContext.currentTime + 0.4);
+        }
         
-        oscillator.frequency.value = 800;
-        oscillator.type = 'sine';
+        // Play beep immediately
+        playBeep();
         
-        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+        // Repeat beep every 800ms continuously
+        ringInterval = setInterval(() => {
+            playBeep();
+        }, 800);
         
-        oscillator.start(audioContext.currentTime);
-        oscillator.stop(audioContext.currentTime + 0.5);
-        
-        // Repeat beep 3 times
-        setTimeout(() => {
-            const osc2 = audioContext.createOscillator();
-            const gain2 = audioContext.createGain();
-            osc2.connect(gain2);
-            gain2.connect(audioContext.destination);
-            osc2.frequency.value = 800;
-            osc2.type = 'sine';
-            gain2.gain.setValueAtTime(0.3, audioContext.currentTime);
-            gain2.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-            osc2.start(audioContext.currentTime);
-            osc2.stop(audioContext.currentTime + 0.5);
-        }, 600);
-        
-        setTimeout(() => {
-            const osc3 = audioContext.createOscillator();
-            const gain3 = audioContext.createGain();
-            osc3.connect(gain3);
-            gain3.connect(audioContext.destination);
-            osc3.frequency.value = 800;
-            osc3.type = 'sine';
-            gain3.gain.setValueAtTime(0.3, audioContext.currentTime);
-            gain3.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-            osc3.start(audioContext.currentTime);
-            osc3.stop(audioContext.currentTime + 0.5);
-        }, 1200);
+        console.log('🔊 Ring audio started');
     } catch (e) {
-        console.log('Audio not supported');
+        console.log('Audio not supported:', e);
     }
 }
 
+function stopRinging() {
+    // Stop the audio interval
+    if (ringInterval) {
+        clearInterval(ringInterval);
+        ringInterval = null;
+    }
+    
+    // Close audio context
+    if (ringAudioContext) {
+        ringAudioContext.close();
+        ringAudioContext = null;
+    }
+    
+    console.log('🔇 Ring audio stopped');
+}
+
 async function dismissRingAlert(notificationId) {
+    // Stop the ringing audio
+    stopRinging();
+    
     // Mark the notification as read
     await markNotificationRead(notificationId);
     
