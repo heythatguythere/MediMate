@@ -9,6 +9,7 @@ import java.util.List;
 public interface UserRepository extends MongoRepository<User, String> {
     Optional<User> findByUsername(String username);
     Optional<User> findByEmail(String email);
+    List<User> findByEmailIgnoreCase(String email);
     List<User> findByRole(String role);
     List<User> findByStatus(String status);
     long countByRole(String role);
