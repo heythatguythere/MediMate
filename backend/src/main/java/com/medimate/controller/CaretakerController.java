@@ -281,11 +281,18 @@ public class CaretakerController {
     
     @PostMapping("/ring-patient")
     public ResponseEntity<?> ringPatient(@RequestHeader("X-Auth-Token") String token, @RequestBody Map<String, String> payload) {
+        System.out.println("🔔 Ring patient endpoint called");
+        
         String caretakerId = tokenService.validate(token);
-        if (caretakerId == null) return ResponseEntity.status(401).build();
+        if (caretakerId == null) {
+            System.out.println("❌ Invalid token");
+            return ResponseEntity.status(401).build();
+        }
 
         String patientEmail = payload.get("patientEmail");
         String patientName = payload.get("patientName");
+        
+        System.out.println("📧 Patient email: " + patientEmail);
         
         if (patientEmail == null || patientEmail.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Patient email is required"));
@@ -293,11 +300,14 @@ public class CaretakerController {
 
         // Find the patient user by email
         List<User> users = userRepository.findByEmailIgnoreCase(patientEmail);
+        System.out.println("👥 Found " + users.size() + " users with email: " + patientEmail);
+        
         if (users.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Patient not found"));
         }
 
         User patientUser = users.get(0);
+        System.out.println("✅ Patient found: " + patientUser.getUsername() + " (ID: " + patientUser.getId() + ")");
         
         // Get caretaker info
         User caretaker = userRepository.findById(caretakerId).orElse(null);
@@ -314,11 +324,13 @@ public class CaretakerController {
         notification.setRead(false);
         notification.setCreatedAt(LocalDateTime.now());
         
-        notificationRepository.save(notification);
+        Notification saved = notificationRepository.save(notification);
+        System.out.println("💾 Notification saved with ID: " + saved.getId());
 
         return ResponseEntity.ok(Map.of(
             "message", "Ring notification sent to " + patientName,
-            "success", true
+            "success", true,
+            "notificationId", saved.getId()
         ));
     }
 }

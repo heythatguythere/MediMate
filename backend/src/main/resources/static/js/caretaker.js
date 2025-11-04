@@ -441,12 +441,15 @@ async function deletePatientConfirm(id) {
 }
 
 async function ringPatient(patientEmail, patientName) {
+    console.log('🔔 Ring button clicked for:', patientName, patientEmail);
+    
     if (!patientEmail) {
         toast('Patient email not available', 'error');
         return;
     }
     
     try {
+        console.log('📤 Sending ring request to backend...');
         const response = await fetch(`${API_BASE}/caretaker/ring-patient`, {
             method: 'POST',
             headers: {
@@ -459,9 +462,13 @@ async function ringPatient(patientEmail, patientName) {
             })
         });
         
+        const data = await response.json();
+        console.log('📥 Backend response:', data);
+        
         if (response.ok) {
             toast(`🔔 Ring sent to ${patientName}'s device`);
         } else {
+            console.error('Ring failed:', data);
             toast('Failed to ring patient', 'error');
         }
     } catch (error) {

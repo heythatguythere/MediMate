@@ -447,16 +447,20 @@ async function loadNotifications() {
         
         if (response.ok) {
             const newNotifications = await response.json();
+            console.log('📬 Loaded notifications:', newNotifications);
             
             // Check for new RING notifications
             const newRings = newNotifications.filter(n => n.type === 'RING' && !n.read && 
                 !allNotifications.some(old => old.id === n.id));
+            
+            console.log('🔔 New RING notifications found:', newRings.length);
             
             allNotifications = newNotifications;
             updateNotifBadge();
             
             // Show ring alert for new ring notifications
             if (newRings.length > 0) {
+                console.log('🚨 Showing ring alert for:', newRings[0]);
                 showRingAlert(newRings[0]);
             }
         }
