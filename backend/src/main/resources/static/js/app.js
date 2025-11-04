@@ -25,6 +25,8 @@ document.addEventListener('DOMContentLoaded', () => {
             window.location.href = '/caretaker';
             return;
         } else {
+            // Clear any URL parameters
+            window.history.replaceState({}, document.title, window.location.pathname);
             showDashboard();
         }
     }
@@ -100,6 +102,8 @@ async function handleLogin(e) {
                 if (data.role === 'Caregiver') {
                     window.location.href = '/caretaker';
                 } else {
+                    // Clear the ?login parameter from URL
+                    window.history.replaceState({}, document.title, window.location.pathname);
                     showDashboard();
                 }
             }, 800);
