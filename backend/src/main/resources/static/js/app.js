@@ -100,8 +100,7 @@ async function handleLogin(e) {
                 if (data.role === 'Caregiver') {
                     window.location.href = '/caretaker';
                 } else {
-                    // Redirect elderly users to the proper dashboard page
-                    window.location.href = '/dashboard';
+                    showDashboard();
                 }
             }, 800);
         } else {
@@ -280,6 +279,9 @@ async function loadDashboardData() {
         // Load notifications
         loadNotifications();
         
+        // Start polling for new notifications every 10 seconds
+        setInterval(loadNotifications, 10000);
+        
     } catch (error) {
         console.error('Error loading dashboard:', error);
     }
@@ -382,16 +384,19 @@ function renderNotificationsDropdownApp() {
             <strong style="font-size:14px;">Notifications</strong>
             <button onclick="markAllNotificationsReadApp()" style="background:none; border:none; color:#3b82f6; cursor:pointer; font-size:12px; font-weight:600;">Mark all read</button>
         </div>
-        ${allNotificationsApp.map(n => `
-            <div style="padding:10px 12px; border-bottom:1px solid #f1f5f9; background:${n.read ? '#fafafa' : 'white'}; transition:background 0.2s;">
+        ${allNotificationsApp.map(n => {
+            const isRing = n.type === 'RING';
+            return `
+            <div style="padding:10px 12px; border-bottom:1px solid #f1f5f9; background:${n.read ? '#fafafa' : (isRing ? '#fff7ed' : 'white')}; border-left:${isRing ? '4px solid #f59e0b' : 'none'}; transition:background 0.2s;">
                 <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:4px;">
-                    <strong style="color:${n.read ? '#94a3b8' : '#1e293b'}; font-size:13px; flex:1;">${n.icon || '🔔'} ${n.title || 'Notification'}</strong>
+                    <strong style="color:${n.read ? '#94a3b8' : (isRing ? '#f59e0b' : '#1e293b')}; font-size:13px; flex:1;">${n.icon || '🔔'} ${n.title || 'Notification'}</strong>
                     <button onclick="deleteNotificationApp('${n.id}')" style="background:none; border:none; cursor:pointer; color:#cbd5e1; font-size:20px; line-height:1; padding:0; margin-left:8px;" title="Delete">×</button>
                 </div>
                 <p style="margin:0 0 8px 0; font-size:13px; color:${n.read ? '#94a3b8' : '#64748b'}; line-height:1.4;">${n.message || ''}</p>
-                ${!n.read ? `<button onclick="markNotificationReadApp('${n.id}')" style="padding:4px 12px; background:#3b82f6; color:white; border:none; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">Mark as Read</button>` : `<small style="color:#94a3b8; font-size:11px;">Read</small>`}
+                ${!n.read ? `<button onclick="markNotificationReadApp('${n.id}')" style="padding:4px 12px; background:${isRing ? '#f59e0b' : '#3b82f6'}; color:white; border:none; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">Mark as Read</button>` : `<small style="color:#94a3b8; font-size:11px;">Read</small>`}
             </div>
-        `).join('')}
+        `;
+        }).join('')}
     `;
 }
 
@@ -443,8 +448,19 @@ async function loadNotifications() {
         const response = await fetch(`${API_BASE}/dashboard/notifications`, {
             headers: { 'X-Auth-Token': authToken }
         });
-        allNotificationsApp = await response.json();
+        const newNotifications = await response.json();
+        
+        // Check for new RING notifications
+        const newRings = newNotifications.filter(n => n.type === 'RING' && !n.read && 
+            !allNotificationsApp.some(old => old.id === n.id));
+        
+        allNotificationsApp = newNotifications;
         updateNotifBadgeApp();
+        
+        // Show ring alert for new ring notifications
+        if (newRings.length > 0) {
+            showRingAlert(newRings[0]);
+        }
     } catch (error) {
         console.error('Error loading notifications:', error);
     }
@@ -789,4 +805,109 @@ function toggleTheme() {
 // Load theme preference
 if (localStorage.getItem('darkMode') === 'true') {
     document.body.classList.add('dark-mode');
+}
+
+// ========== RING NOTIFICATION FEATURE ==========
+// Global variables for ring audio control
+let ringAudioContext = null;
+let ringInterval = null;
+
+function showRingAlert(notification) {
+    // Create a prominent modal alert
+    const alertDiv = document.createElement('div');
+    alertDiv.id = 'ring-alert-modal';
+    alertDiv.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:10000; display:flex; align-items:center; justify-content:center;';
+    
+    alertDiv.innerHTML = `
+        <div style="background:white; padding:32px; border-radius:16px; max-width:400px; text-align:center; box-shadow:0 20px 60px rgba(0,0,0,0.3); animation:ringPulse 1s infinite;">
+            <div style="font-size:64px; margin-bottom:16px; animation:ringBell 0.5s infinite;">🔔</div>
+            <h2 style="margin:0 0 8px; color:#1e293b; font-size:24px;">${notification.title}</h2>
+            <p style="margin:0 0 24px; color:#64748b; font-size:16px;">${notification.message}</p>
+            <div style="display:flex; gap:12px; justify-content:center;">
+                <button onclick="stopRinging()" style="background:#64748b; color:white; border:none; padding:12px 24px; border-radius:8px; cursor:pointer; font-size:16px; font-weight:600;">Stop Ring</button>
+                <button onclick="dismissRingAlert('${notification.id}')" style="background:#f59e0b; color:white; border:none; padding:12px 32px; border-radius:8px; cursor:pointer; font-size:16px; font-weight:600;">OK, I'm Here!</button>
+            </div>
+        </div>
+        <style>
+            @keyframes ringBell {
+                0%, 100% { transform: rotate(-15deg); }
+                50% { transform: rotate(15deg); }
+            }
+            @keyframes ringPulse {
+                0%, 100% { transform: scale(1); }
+                50% { transform: scale(1.02); }
+            }
+        </style>
+    `;
+    
+    document.body.appendChild(alertDiv);
+    
+    // Start continuous ringing audio
+    startRingingAudio();
+}
+
+function startRingingAudio() {
+    try {
+        ringAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+        
+        // Function to play a single beep
+        function playBeep() {
+            const oscillator = ringAudioContext.createOscillator();
+            const gainNode = ringAudioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(ringAudioContext.destination);
+            
+            oscillator.frequency.value = 800; // 800 Hz tone
+            oscillator.type = 'sine';
+            
+            gainNode.gain.setValueAtTime(0.3, ringAudioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, ringAudioContext.currentTime + 0.4);
+            
+            oscillator.start(ringAudioContext.currentTime);
+            oscillator.stop(ringAudioContext.currentTime + 0.4);
+        }
+        
+        // Play beep immediately
+        playBeep();
+        
+        // Repeat beep every 800ms continuously
+        ringInterval = setInterval(() => {
+            playBeep();
+        }, 800);
+        
+        console.log('🔊 Ring audio started');
+    } catch (e) {
+        console.log('Audio not supported:', e);
+    }
+}
+
+function stopRinging() {
+    // Stop the audio interval
+    if (ringInterval) {
+        clearInterval(ringInterval);
+        ringInterval = null;
+    }
+    
+    // Close audio context
+    if (ringAudioContext) {
+        ringAudioContext.close();
+        ringAudioContext = null;
+    }
+    
+    console.log('🔇 Ring audio stopped');
+}
+
+async function dismissRingAlert(notificationId) {
+    // Stop the ringing audio
+    stopRinging();
+    
+    // Mark the notification as read
+    await markNotificationReadApp(notificationId);
+    
+    // Remove the alert modal
+    const alertDiv = document.getElementById('ring-alert-modal');
+    if (alertDiv) {
+        alertDiv.remove();
+    }
 }
