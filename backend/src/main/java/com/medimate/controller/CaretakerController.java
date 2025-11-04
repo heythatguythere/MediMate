@@ -19,15 +19,17 @@ public class CaretakerController {
     private final AppointmentRepository appointmentRepository;
     private final TaskRepository taskRepository;
     private final UserRepository userRepository;
+    private final NotificationRepository notificationRepository;
 
     public CaretakerController(TokenService tokenService, PatientRepository patientRepository,
                               AppointmentRepository appointmentRepository, TaskRepository taskRepository,
-                              UserRepository userRepository) {
+                              UserRepository userRepository, NotificationRepository notificationRepository) {
         this.tokenService = tokenService;
         this.patientRepository = patientRepository;
         this.appointmentRepository = appointmentRepository;
         this.taskRepository = taskRepository;
         this.userRepository = userRepository;
+        this.notificationRepository = notificationRepository;
     }
 
     // Dashboard Stats
@@ -273,5 +275,50 @@ public class CaretakerController {
                 return ResponseEntity.ok(task);
             })
             .orElse(ResponseEntity.notFound().build());
+    }
+
+    // ========== RING PATIENT ==========
+    
+    @PostMapping("/ring-patient")
+    public ResponseEntity<?> ringPatient(@RequestHeader("X-Auth-Token") String token, @RequestBody Map<String, String> payload) {
+        String caretakerId = tokenService.validate(token);
+        if (caretakerId == null) return ResponseEntity.status(401).build();
+
+        String patientEmail = payload.get("patientEmail");
+        String patientName = payload.get("patientName");
+        
+        if (patientEmail == null || patientEmail.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Patient email is required"));
+        }
+
+        // Find the patient user by email
+        List<User> users = userRepository.findByEmailIgnoreCase(patientEmail);
+        if (users.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Patient not found"));
+        }
+
+        User patientUser = users.get(0);
+        
+        // Get caretaker info
+        User caretaker = userRepository.findById(caretakerId).orElse(null);
+        String caretakerName = caretaker != null ? caretaker.getUsername() : "Your Caretaker";
+
+        // Create a special ring notification for the patient
+        Notification notification = new Notification();
+        notification.setUserId(patientUser.getId());
+        notification.setTitle("🔔 Urgent: Caretaker Calling");
+        notification.setMessage(caretakerName + " is trying to reach you. Please check your device immediately!");
+        notification.setType("RING");
+        notification.setIcon("🔔");
+        notification.setColor("#f59e0b");
+        notification.setRead(false);
+        notification.setCreatedAt(LocalDateTime.now());
+        
+        notificationRepository.save(notification);
+
+        return ResponseEntity.ok(Map.of(
+            "message", "Ring notification sent to " + patientName,
+            "success", true
+        ));
     }
 }

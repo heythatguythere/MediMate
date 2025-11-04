@@ -349,6 +349,7 @@ function renderPatientsDetailed() {
                 <button class="btn-secondary" onclick="openViewMedsModal('${p.id}', '${p.name}', '${p.email}')">📋 View Medications</button>
                 <button class="btn-secondary" onclick="openAddAptModal('${p.id}', '${p.name}')">📅 Add Appointment</button>
                 <button class="btn-secondary" onclick="openAddTaskModal('${p.id}', '${p.name}')">✅ Add Task</button>
+                <button class="btn-primary" onclick="ringPatient('${p.email}', '${p.name}')" style="background:#f59e0b;">🔔 Ring Device</button>
             </div>
         </div>
     `).join('');
@@ -436,6 +437,36 @@ async function deletePatientConfirm(id) {
     } catch (error) {
         console.error('Error deleting patient:', error);
         toast('Error deleting patient', 'error');
+    }
+}
+
+async function ringPatient(patientEmail, patientName) {
+    if (!patientEmail) {
+        toast('Patient email not available', 'error');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/caretaker/ring-patient`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Auth-Token': authToken
+            },
+            body: JSON.stringify({
+                patientEmail: patientEmail,
+                patientName: patientName
+            })
+        });
+        
+        if (response.ok) {
+            toast(`🔔 Ring sent to ${patientName}'s device`);
+        } else {
+            toast('Failed to ring patient', 'error');
+        }
+    } catch (error) {
+        console.error('Error ringing patient:', error);
+        toast('Error ringing patient', 'error');
     }
 }
 
