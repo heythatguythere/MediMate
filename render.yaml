@@ -1,7 +1,7 @@
 services:
   - type: web
     name: medimate
-    runtime: java
+    env: java
     rootDir: backend
     plan: free
     buildCommand: mvn clean package -DskipTests
