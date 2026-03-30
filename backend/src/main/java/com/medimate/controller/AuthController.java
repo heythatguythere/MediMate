@@ -135,4 +135,10 @@ public class AuthController {
                 )))
                 .orElse(ResponseEntity.status(404).build());
     }
+
+    @PostMapping("/logout")
+    public ResponseEntity<?> logout(@RequestHeader("X-Auth-Token") String token) {
+        tokenService.revoke(token);
+        return ResponseEntity.ok(Map.of("message", "Logged out"));
+    }
 }

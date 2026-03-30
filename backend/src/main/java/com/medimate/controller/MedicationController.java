@@ -54,6 +54,31 @@ public class MedicationController {
         return ResponseEntity.ok(saved);
     }
 
+    @PutMapping("/{id}")
+    public ResponseEntity<?> update(@RequestHeader("X-Auth-Token") String token,
+                                    @PathVariable("id") String id,
+                                    @RequestBody Medication update) {
+        String userId = tokenService.validate(token);
+        if (userId == null) return ResponseEntity.status(401).build();
+
+        return medicationRepository.findById(id)
+                .filter(m -> m.getUserId().equals(userId))
+                .map(existing -> {
+                    if (update.getName() != null && !update.getName().isBlank()) {
+                        existing.setName(update.getName().trim());
+                    }
+                    if (update.getDosage() != null && !update.getDosage().isBlank()) {
+                        existing.setDosage(update.getDosage().trim());
+                    }
+                    if (update.getSchedule() != null && !update.getSchedule().isBlank()) {
+                        existing.setSchedule(update.getSchedule().trim());
+                    }
+                    Medication saved = medicationRepository.save(existing);
+                    return ResponseEntity.ok(saved);
+                })
+                .orElse(ResponseEntity.status(404).build());
+    }
+
     @DeleteMapping("/{id}")
     public ResponseEntity<?> delete(@RequestHeader("X-Auth-Token") String token, @PathVariable("id") String id) {
         String userId = tokenService.validate(token);

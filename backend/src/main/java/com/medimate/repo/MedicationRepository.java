@@ -7,4 +7,5 @@ import java.util.List;
 
 public interface MedicationRepository extends MongoRepository<Medication, String> {
     List<Medication> findByUserId(String userId);
+    long countByActiveTrue();
 }

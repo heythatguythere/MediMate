@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediMate - Patient Dashboard</title>
+    <link rel="stylesheet" href="css/dashboard.css?v=20251029-1">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h2>🏥 MediMate</h2>
+                <div style="position:relative; display:inline-block; margin-left:auto;">
+                    <button onclick="toggleNotifications()" style="background:none; border:none; font-size:24px; cursor:pointer; position:relative;">
+                        🔔
+                        <span id="notif-badge" style="display:none; position:absolute; top:-5px; right:-5px; background:#ef4444; color:white; border-radius:50%; width:18px; height:18px; font-size:11px; font-weight:bold;"></span>
+                    </button>
+                    <div id="notif-dropdown" style="display:none; position:absolute; right:0; top:40px; background:white; border:1px solid #e5e7eb; border-radius:8px; width:320px; max-height:400px; overflow-y:auto; box-shadow:0 4px 12px rgba(0,0,0,0.15); z-index:1000;"></div>
+                </div>
+            </div>
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active" onclick="showSection('overview')">
+                    <span>📊</span> Overview
+                </a>
+                <a href="#" class="nav-item" onclick="showSection('medications')">
+                    <span>💊</span> Medications
+                </a>
+                <a href="#" class="nav-item" onclick="showSection('wellness')">
+                    <span>❤️</span> Wellness
+                </a>
+                <a href="#" class="nav-item" onclick="showSection('insights')">
+                    <span>🤖</span> AI Insights
+                </a>
+                <a href="#" class="nav-item" onclick="showSection('profile')">
+                    <span>👤</span> Profile
+                </a>
+                <a href="#" class="nav-item" onclick="showSection('emergency')">
+                    <span>🚑</span> Emergency
+                </a>
+                <a href="#" class="nav-item" onclick="logout()">
+                    <span>🚪</span> Logout
+                </a>
+            </nav>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="dashboard-header">
+                <h1>Welcome, <span id="user-name">Patient</span>!</h1>
+                <div class="header-actions">
+                    <button class="btn-refresh" onclick="refreshDashboard()">🔄 Refresh</button>
+                </div>
+            </header>
+
+            <!-- Overview Section -->
+            <section id="overview-section" class="content-section active">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">🔥</div>
+                        <div class="stat-info">
+                            <h3 id="stat-streak">0</h3>
+                            <p>Day Streak</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">💊</div>
+                        <div class="stat-info">
+                            <h3 id="stat-medications">0</h3>
+                            <p>Medications</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">😊</div>
+                        <div class="stat-info">
+                            <h3 id="stat-mood">Good</h3>
+                            <p>Today's Mood</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⚡</div>
+                        <div class="stat-info">
+                            <h3 id="stat-energy">7</h3>
+                            <p>Energy Level</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <!-- Mood Trends Chart -->
+                    <div class="card">
+                        <h3>📈 Mood Trends (Last 7 Days)</h3>
+                        <div id="mood-chart" class="chart-container">
+                            <canvas id="moodCanvas"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Upcoming Medications -->
+                    <div class="card">
+                        <h3>⏰ Upcoming Medications</h3>
+                        <div id="upcoming-medications" class="upcoming-list">
+                            <p class="loading">Loading...</p>
+                        </div>
+                    </div>
+
+                    <!-- AI Insights -->
+                    <div class="card ai-insights-card">
+                        <h3>🤖 AI Health Insights</h3>
+                        <div id="ai-insights" class="ai-insights">
+                            <p class="loading">Loading insights...</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Profile Section -->
+            <section id="profile-section" class="content-section">
+                <div class="section-header">
+                    <h2>👤 Edit Profile</h2>
+                    <button class="btn-primary" onclick="saveProfile()">Save</button>
+                </div>
+                <div class="card">
+                    <form id="profile-form" onsubmit="event.preventDefault(); saveProfile();">
+                        <div class="form-group">
+                            <label>Full Name</label>
+                            <input id="pf-fullname" placeholder="Your name">
+                        </div>
+                        <div class="form-group">
+                            <label>Email</label>
+                            <input id="pf-email" placeholder="you@example.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Phone</label>
+                            <input id="pf-phone" placeholder="Phone number">
+                        </div>
+                        <div class="form-group">
+                            <label>Date of Birth</label>
+                            <input id="pf-dob" placeholder="YYYY-MM-DD">
+                        </div>
+                        <div class="form-group">
+                            <label>Address</label>
+                            <input id="pf-address" placeholder="Your address">
+                        </div>
+                        <p class="hint">These details help your caretaker claim and match your account.</p>
+                    </form>
+                </div>
+            </section>
+
+            <!-- Emergency Section (India) -->
+            <section id="emergency-section" class="content-section">
+                <div class="section-header">
+                    <h2>🚑 Emergency</h2>
+                    <button class="btn-secondary" onclick="loadEmergency()">Refresh Nearby</button>
+                </div>
+                <div class="card">
+                    <h3>🚨 Important Helplines (India)</h3>
+                    <ul style="list-style:none; padding:0;">
+                        <li style="padding:8px 0; border-bottom:1px solid #e5e7eb;">📞 <strong>112</strong> — Emergency (Police, Fire, Ambulance)</li>
+                        <li style="padding:8px 0; border-bottom:1px solid #e5e7eb;">🚑 <strong>102</strong> — Ambulance</li>
+                        <li style="padding:8px 0; border-bottom:1px solid #e5e7eb;">🚑 <strong>108</strong> — Ambulance (Free)</li>
+                        <li style="padding:8px 0; border-bottom:1px solid #e5e7eb;">👮 <strong>100</strong> — Police</li>
+                        <li style="padding:8px 0; border-bottom:1px solid #e5e7eb;">🔥 <strong>101</strong> — Fire Brigade</li>
+                        <li style="padding:8px 0; border-bottom:1px solid #e5e7eb;">👩 <strong>1091</strong> — Women Helpline</li>
+                        <li style="padding:8px 0; border-bottom:1px solid #e5e7eb;">👶 <strong>1098</strong> — Child Helpline</li>
+                        <li style="padding:8px 0;">🏥 <strong>104</strong> — National Health Helpline</li>
+                    </ul>
+                </div>
+                <div class="card">
+                    <h3>Nearby Hospitals & Police</h3>
+                    <div id="nearby-list"><p class="loading">Detecting your location...</p></div>
+                </div>
+            </section>
+
+            <!-- Medications Section (view-only; assigned by caretaker) -->
+            <section id="medications-section" class="content-section">
+                <div class="section-header">
+                    <h2>💊 My Medications</h2>
+                </div>
+                <p style="margin: 8px 0 16px; color:#64748b;">Medications are assigned by your caretaker. You can view your schedule here.</p>
+                <div id="medications-list" class="medications-grid">
+                    <p class="loading">Loading medications...</p>
+                </div>
+            </section>
+
+            <!-- Wellness Section -->
+            <section id="wellness-section" class="content-section">
+                <div class="section-header">
+                    <h2>❤️ Wellness Log</h2>
+                </div>
+                
+                <div class="wellness-form-card card">
+                    <h3>Log Today's Wellness</h3>
+                    <form id="wellness-form" onsubmit="submitWellness(event)">
+                        <div class="form-group">
+                            <label>How are you feeling today?</label>
+                            <select id="mood-select" required>
+                                <option value="">Select mood...</option>
+                                <option value="Excellent">😄 Excellent</option>
+                                <option value="Good">😊 Good</option>
+                                <option value="Okay">😐 Okay</option>
+                                <option value="Low">😔 Low</option>
+                                <option value="Tired">😴 Tired</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Energy Level (1-10)</label>
+                            <input type="range" id="energy-slider" min="1" max="10" value="5" oninput="updateEnergyValue(this.value)">
+                            <span id="energy-value">5</span>
+                        </div>
+                        <div class="form-group">
+                            <label>Notes (optional)</label>
+                            <textarea id="wellness-notes" rows="3" placeholder="Any additional notes..."></textarea>
+                        </div>
+                        <button type="submit" class="btn-primary">Submit Wellness Log</button>
+                    </form>
+                </div>
+
+                <div class="card">
+                    <h3>📋 Recent Wellness Logs</h3>
+                    <div id="wellness-history" class="wellness-history">
+                        <p class="loading">Loading wellness history...</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Insights Section -->
+            <section id="insights-section" class="content-section">
+                <div class="section-header">
+                    <h2>🤖 AI Health Insights</h2>
+                    <button class="btn-primary" onclick="loadAIInsights()">🔄 Refresh Insights</button>
+                </div>
+                <div class="card ai-insights-full">
+                    <div id="ai-insights-full" class="ai-insights-content">
+                        <p class="loading">Loading AI insights...</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="js/dashboard.js?v=20251030-9"></script>
+</body>
+</html>

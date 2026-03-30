@@ -9,4 +9,5 @@ public interface MedicationLogRepository extends MongoRepository<MedicationLog, 
     List<MedicationLog> findByUserId(String userId);
     List<MedicationLog> findByUserIdAndStatus(String userId, String status);
     List<MedicationLog> findByStatusAndScheduledTimeBefore(String status, LocalDateTime time);
+    long countByStatus(String status);
 }

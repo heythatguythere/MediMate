@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.*;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/wellness")
@@ -47,6 +48,20 @@ public class WellnessController {
         updateStreak(userId, log.getDate());
         
         return ResponseEntity.ok(saved);
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<?> delete(@RequestHeader("X-Auth-Token") String token, @PathVariable("id") String id) {
+        String userId = tokenService.validate(token);
+        if (userId == null) return ResponseEntity.status(401).build();
+
+        Optional<WellnessLog> target = repo.findById(id).filter(l -> l.getUserId().equals(userId));
+        if (target.isEmpty()) {
+            return ResponseEntity.status(404).build();
+        }
+
+        repo.delete(target.get());
+        return ResponseEntity.noContent().build();
     }
     
     private void updateStreak(String userId, LocalDate logDate) {

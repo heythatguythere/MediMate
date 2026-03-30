@@ -3,6 +3,40 @@ Write-Host "Starting MediMate Backend..." -ForegroundColor Green
 
 $env:MAVEN_OPTS="-Dmaven.multiModuleProjectDirectory=$PSScriptRoot\backend"
 
+function Load-DotEnvFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (!(Test-Path $Path)) {
+        return
+    }
+
+    Get-Content $Path | ForEach-Object {
+        $line = $_.Trim()
+
+        if ([string]::IsNullOrWhiteSpace($line)) { return }
+        if ($line.StartsWith('#')) { return }
+
+        $idx = $line.IndexOf('=')
+        if ($idx -lt 1) { return }
+
+        $key = $line.Substring(0, $idx).Trim()
+        $val = $line.Substring($idx + 1)
+
+        if ([string]::IsNullOrWhiteSpace($key)) { return }
+
+        if (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'"))) {
+            $val = $val.Substring(1, $val.Length - 2)
+        }
+
+        Set-Item -Path "Env:$key" -Value $val
+    }
+}
+
+Load-DotEnvFile "$PSScriptRoot\backend\.env"
+
 # Check if Maven is installed
 if (Get-Command mvn -ErrorAction SilentlyContinue) {
     Set-Location "$PSScriptRoot\backend"
