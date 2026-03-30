@@ -5,6 +5,7 @@ services:
     rootDir: backend
     plan: free
     dockerfilePath: ./Dockerfile
+    healthCheckPath: /
     autoDeploy: true
     envVars:
       - key: MONGODB_URI
