@@ -1,7 +1,0 @@
-# Phishing Detector Dashboard
-
-- [x] Create `static/` directory with [index.html](file:///Users/david/fish/static/index.html), [style.css](file:///Users/david/fish/static/style.css), [script.js](file:///Users/david/fish/static/script.js)
-- [x] Build glassmorphism dark-theme dashboard with Inter font
-- [x] Wire up the `/analyze` API calls from the frontend
-- [x] Add dashboard route and static file serving to [fish.py](file:///Users/david/fish/fish.py)
-- [x] Verify the dashboard loads and works end-to-end

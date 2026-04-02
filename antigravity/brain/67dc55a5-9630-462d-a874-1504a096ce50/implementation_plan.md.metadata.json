@@ -1,5 +1,0 @@
-{
-  "artifactType": "ARTIFACT_TYPE_IMPLEMENTATION_PLAN",
-  "summary": "Plan to build a premium dark-theme dashboard with glassmorphism design, Inter font, animated transitions, and email analysis functionality. Involves creating static frontend files and modifying fish.py to serve them.",
-  "updatedAt": "2026-03-22T18:57:23.792519Z"
-}

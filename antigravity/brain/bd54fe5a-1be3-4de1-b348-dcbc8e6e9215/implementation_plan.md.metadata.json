@@ -1,6 +1,0 @@
-{
-  "artifactType": "ARTIFACT_TYPE_IMPLEMENTATION_PLAN",
-  "summary": "Implementation plan for applying the Backend brand identity specification to the MediMate project. This covers sweeping UI/UX changes across all MediMate HTML and CSS files, converting the aesthetic to the tech-focused, terminal green, and monospaced brand identity.",
-  "updatedAt": "2026-04-02T05:07:33.333721Z",
-  "requestFeedback": true
-}
