@@ -174,6 +174,9 @@ async function loadActivityFeed() {
         feed.innerHTML = activities.map((activity) => `
             <div class="activity-item">
                 <strong>${escapeHtml(activity.action)}${activity.user ? `: ${escapeHtml(activity.user)}` : ''}</strong>
+                <div style="margin-top:8px;">
+                    <span class="status-badge ${(activity.status || 'Active').toLowerCase()}">${escapeHtml(activity.status || 'Active')}</span>
+                </div>
                 <p class="activity-time">${escapeHtml(activity.time || 'Recently')}</p>
             </div>
         `).join('') || '<p>No recent activity.</p>';

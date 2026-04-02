@@ -373,7 +373,8 @@ public class AdminController {
                 .map(u -> Map.of(
                         "action", "New user registered",
                         "user", u.getFullName() != null ? u.getFullName() : u.getUsername(),
-                        "time", u.getJoinedDate() != null ? u.getJoinedDate() : "Recently"
+                        "time", u.getJoinedDate() != null ? u.getJoinedDate() : "Recently",
+                        "status", u.getStatus() != null ? u.getStatus() : "Active"
                 )).collect(Collectors.toList());
         return ResponseEntity.ok(activity);
     }
