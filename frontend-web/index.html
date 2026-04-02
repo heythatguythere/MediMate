@@ -285,11 +285,16 @@
             const forceLogin = urlParams.get('login') !== null;
             
             if (token && !forceLogin) {
-                // Immediately show dashboard screen
-                document.addEventListener('DOMContentLoaded', function() {
-                    document.getElementById('auth-screen').classList.remove('active');
-                    document.getElementById('dashboard-screen').classList.add('active');
-                });
+                if (userRole && String(userRole).toLowerCase() === 'admin') {
+                    window.location.replace('/admin');
+                } else if (userRole === 'Caregiver') {
+                    window.location.replace('/caretaker');
+                } else {
+                    document.addEventListener('DOMContentLoaded', function() {
+                        document.getElementById('auth-screen').classList.remove('active');
+                        document.getElementById('dashboard-screen').classList.add('active');
+                    });
+                }
             }
         })();
     </script>

@@ -2,6 +2,10 @@
 const API_BASE = '/api';
 let authToken = localStorage.getItem('authToken');
 
+function isAdminRole(role) {
+    return role && String(role).toLowerCase() === 'admin';
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     // Check URL parameters
@@ -20,15 +24,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (authToken && !forceLogin) {
         const userRole = localStorage.getItem('userRole');
         
-        // Redirect based on role
+        // Redirect based on role (Admin users go to admin portal)
+        if (isAdminRole(userRole)) {
+            window.location.href = '/admin';
+            return;
+        }
         if (userRole === 'Caregiver') {
             window.location.href = '/caretaker';
             return;
-        } else {
-            // Clear any URL parameters
-            window.history.replaceState({}, document.title, window.location.pathname);
-            showDashboard();
         }
+        // Clear any URL parameters
+        window.history.replaceState({}, document.title, window.location.pathname);
+        showDashboard();
     }
     
     // Setup form handlers with null checks
@@ -99,13 +106,17 @@ async function handleLogin(e) {
             
             // Role-based redirection
             setTimeout(() => {
+                if (isAdminRole(data.role)) {
+                    window.location.href = '/admin';
+                    return;
+                }
                 if (data.role === 'Caregiver') {
                     window.location.href = '/caretaker';
-                } else {
-                    // Clear the ?login parameter from URL
-                    window.history.replaceState({}, document.title, window.location.pathname);
-                    showDashboard();
+                    return;
                 }
+                // Clear the ?login parameter from URL
+                window.history.replaceState({}, document.title, window.location.pathname);
+                showDashboard();
             }, 800);
         } else {
             status.textContent = '✗ ' + (data.error || 'Invalid username or password');

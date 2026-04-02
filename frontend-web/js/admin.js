@@ -7,7 +7,27 @@ let allAppointments = [];
 let appointmentsChartRef = null;
 let caretakersChartRef = null;
 let usersChartRef = null;
-let adherenceChartRef = null;
+let adherenceBarChartRef = null;
+let lastReport = null;
+
+function escapeHtml(s) {
+    if (s == null) return '';
+    const div = document.createElement('div');
+    div.textContent = String(s);
+    return div.innerHTML;
+}
+
+function roleBadgeClass(role) {
+    if (!role) return 'elderly';
+    const r = String(role).toLowerCase();
+    if (r === 'caregiver') return 'caregiver';
+    if (r === 'admin') return 'admin';
+    return 'elderly';
+}
+
+function findUserById(id) {
+    return allUsers.find((u) => u.id === id) || allCaretakers.find((c) => c.id === id);
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
     if (!authToken) {
@@ -16,7 +36,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     const isAdmin = await ensureAdmin();
     if (!isAdmin) return;
+    await loadAdminProfile();
     bindSearch();
+    bindUserFilters();
+    bindChartFilters();
+    bindSettingsPrefs();
     await Promise.all([
         loadDashboardStats(),
         loadUsersFromBackend(),
@@ -53,7 +77,7 @@ async function ensureAdmin() {
         const res = await api('/auth/me', { headers: {} });
         if (!res.ok) return false;
         const me = await res.json();
-        if (!me.role || me.role.toLowerCase() !== 'admin') {
+        if (!me.role || String(me.role).toLowerCase() !== 'admin') {
             alert('Admin access is required.');
             window.location.href = '/app';
             return false;
@@ -62,6 +86,21 @@ async function ensureAdmin() {
     } catch (err) {
         console.error('Admin validation failed:', err);
         return false;
+    }
+}
+
+async function loadAdminProfile() {
+    try {
+        const res = await api('/auth/me');
+        if (!res.ok) return;
+        const me = await res.json();
+        const name = me.fullName || me.username || 'Admin';
+        const el = document.getElementById('admin-display-name');
+        const lab = document.getElementById('admin-profile-label');
+        if (el) el.textContent = name;
+        if (lab) lab.textContent = name.split(' ')[0] || 'Admin';
+    } catch (e) {
+        console.warn('Profile load skipped', e);
     }
 }
 
@@ -84,10 +123,27 @@ async function loadDashboardStats() {
         const response = await api('/admin/stats');
         if (!response.ok) return;
         const stats = await response.json();
-        document.querySelector('.stat-card.patients h3').textContent = stats.elderlyUsers || 0;
-        document.querySelector('.stat-card.caretakers h3').textContent = stats.caretakers || 0;
-        document.querySelector('.stat-card.appointments h3').textContent = stats.appointments || 0;
-        document.querySelector('.stat-card.medications h3').textContent = stats.medications || 0;
+
+        const elderly = stats.elderlyUsers ?? 0;
+        const cg = stats.caretakers ?? 0;
+        const ap = stats.appointments ?? 0;
+        const med = stats.medications ?? 0;
+        const total = stats.totalUsers ?? 0;
+        const active = stats.activeUsers ?? 0;
+
+        const set = (id, val) => {
+            const n = document.getElementById(id);
+            if (n) n.textContent = val;
+        };
+        set('stat-elderly', elderly);
+        set('stat-caretakers', cg);
+        set('stat-appointments', ap);
+        set('stat-medications', med);
+
+        set('stat-elderly-sub', `${total} total accounts`);
+        set('stat-caretakers-sub', `${active} active users overall`);
+        set('stat-appointments-sub', 'All appointment records');
+        set('stat-medications-sub', 'Active + inactive med entries');
     } catch (error) {
         console.error('Error loading dashboard stats:', error);
     }
@@ -95,19 +151,35 @@ async function loadDashboardStats() {
 
 async function loadActivityFeed() {
     const feed = document.getElementById('activity-feed');
+    const badge = document.getElementById('admin-notif-badge');
     try {
         const response = await api('/admin/activity');
         const activities = response.ok ? await response.json() : [];
+        if (badge) badge.textContent = String(activities.length);
         feed.innerHTML = activities.map((activity) => `
             <div class="activity-item">
-                <strong>${activity.action}${activity.user ? `: ${activity.user}` : ''}</strong>
-                <p class="activity-time">${activity.time || 'Recently'}</p>
+                <strong>${escapeHtml(activity.action)}${activity.user ? `: ${escapeHtml(activity.user)}` : ''}</strong>
+                <p class="activity-time">${escapeHtml(activity.time || 'Recently')}</p>
             </div>
         `).join('') || '<p>No recent activity.</p>';
     } catch (error) {
         console.error('Error loading activity feed:', error);
         feed.innerHTML = '<p>Unable to load activity.</p>';
+        if (badge) badge.textContent = '0';
     }
+}
+
+function appointmentInRange(apt, rangeVal) {
+    if (rangeVal === 'all') return true;
+    if (!apt.date) return false;
+    const d = new Date(`${apt.date}T12:00:00`);
+    if (Number.isNaN(d.getTime())) return false;
+    const now = new Date();
+    const days = Number(rangeVal);
+    const cutoff = new Date(now);
+    cutoff.setDate(cutoff.getDate() - days);
+    cutoff.setHours(0, 0, 0, 0);
+    return d >= cutoff && d <= now;
 }
 
 function renderDashboardCharts() {
@@ -116,13 +188,19 @@ function renderDashboardCharts() {
 }
 
 function renderAppointmentsChart() {
-    const ctx = document.getElementById('appointments-chart').getContext('2d');
+    const canvas = document.getElementById('appointments-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
     if (appointmentsChartRef) appointmentsChartRef.destroy();
 
+    const sel = document.getElementById('appointments-range-select');
+    const rangeVal = sel ? sel.value : '7';
+
+    const filtered = allAppointments.filter((a) => appointmentInRange(a, rangeVal));
     const byDay = { Mon: 0, Tue: 0, Wed: 0, Thu: 0, Fri: 0, Sat: 0, Sun: 0 };
-    allAppointments.forEach((apt) => {
+    filtered.forEach((apt) => {
         if (!apt.date) return;
-        const day = new Date(`${apt.date}T00:00:00`).toLocaleDateString('en-US', { weekday: 'short' });
+        const day = new Date(`${apt.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short' });
         if (Object.prototype.hasOwnProperty.call(byDay, day)) byDay[day] += 1;
     });
 
@@ -139,23 +217,45 @@ function renderAppointmentsChart() {
                 fill: true
             }]
         },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true },
+                title: { display: true, text: `${filtered.length} in selected range` }
+            },
+            scales: { y: { beginAtZero: true } }
+        }
     });
 }
 
 function renderCaretakersChart() {
-    const ctx = document.getElementById('caretakers-chart').getContext('2d');
+    const canvas = document.getElementById('caretakers-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
     if (caretakersChartRef) caretakersChartRef.destroy();
 
-    const labels = allCaretakers.map((c) => c.fullName || c.username || 'Caretaker');
-    const data = allCaretakers.map(() => 1);
+    const labels = allCaretakers.map((c) => c.fullName || c.username || 'Caregiver');
+    const data = allCaretakers.map((c) => Number(c.patientCount) || 0);
+    const colors = ['#3b82f6', '#06b6d4', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#64748b', '#f43f5e'];
+
     caretakersChartRef = new Chart(ctx, {
         type: 'doughnut',
         data: {
-            labels: labels.length ? labels : ['No caretakers'],
-            datasets: [{ data: data.length ? data : [1], backgroundColor: ['#3b82f6', '#06b6d4', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'] }]
+            labels: labels.length ? labels : ['No caregivers yet'],
+            datasets: [{
+                data: data.length && data.some((n) => n > 0) ? data : [1],
+                backgroundColor: labels.length ? colors.slice(0, labels.length) : ['#cbd5e1']
+            }]
         },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'bottom' },
+                title: { display: true, text: 'Patients per caregiver' }
+            }
+        }
     });
 }
 
@@ -164,7 +264,7 @@ async function loadUsersFromBackend() {
         const response = await api('/admin/users');
         if (!response.ok) return;
         allUsers = await response.json();
-        renderUsers(allUsers);
+        applyUserFilters();
     } catch (error) {
         console.error('Error loading users:', error);
     }
@@ -174,38 +274,93 @@ function renderUsers(users) {
     const tbody = document.getElementById('users-tbody');
     tbody.innerHTML = users.map((user) => `
         <tr>
-            <td>#${(user.id || '').substring(0, 8)}</td>
-            <td><strong>${user.fullName || user.username || 'Unknown'}</strong></td>
-            <td>${user.email || 'N/A'}</td>
-            <td><span class="role-badge ${user.role === 'Caregiver' ? 'caregiver' : 'elderly'}">${user.role || 'N/A'}</span></td>
-            <td><span class="status-badge ${(user.status || 'Active').toLowerCase()}">${user.status || 'Active'}</span></td>
-            <td>${user.joinedDate || 'N/A'}</td>
+            <td>#${escapeHtml((user.id || '').substring(0, 8))}</td>
+            <td><strong>${escapeHtml(user.fullName || user.username || 'Unknown')}</strong></td>
+            <td>${escapeHtml(user.email || 'N/A')}</td>
+            <td><span class="role-badge ${roleBadgeClass(user.role)}">${escapeHtml(user.role || 'N/A')}</span></td>
+            <td><span class="status-badge ${(user.status || 'Active').toLowerCase()}">${escapeHtml(user.status || 'Active')}</span></td>
+            <td>${escapeHtml(user.joinedDate || 'N/A')}</td>
             <td class="table-actions">
-                <button class="btn-icon" onclick="editUser('${user.id}')" title="Edit">✏️</button>
-                <button class="btn-icon" onclick="deleteUserConfirm('${user.id}')" title="Delete">🗑️</button>
+                <button type="button" class="btn-icon" onclick="editUser('${user.id}')" title="Edit">✏️</button>
+                <button type="button" class="btn-icon" onclick="deleteUserConfirm('${user.id}')" title="Delete">🗑️</button>
             </td>
         </tr>
-    `).join('');
+    `).join('') || '<tr><td colspan="7">No users match filters.</td></tr>';
+}
+
+function applyUserFilters() {
+    const q = (document.getElementById('users-search-input')?.value || '').toLowerCase().trim();
+    const roleF = document.getElementById('users-filter-role')?.value || '';
+    const statusF = document.getElementById('users-filter-status')?.value || '';
+
+    let list = [...allUsers];
+    if (roleF) {
+        const r = roleF.toLowerCase();
+        list = list.filter((u) => String(u.role || '').toLowerCase() === r);
+    }
+    if (statusF) list = list.filter((u) => (u.status || 'Active') === statusF);
+    if (q) {
+        list = list.filter(
+            (u) =>
+                (u.username || '').toLowerCase().includes(q) ||
+                (u.fullName || '').toLowerCase().includes(q) ||
+                (u.email || '').toLowerCase().includes(q)
+        );
+    }
+    renderUsers(list);
+}
+
+function bindUserFilters() {
+    const search = document.getElementById('users-search-input');
+    const role = document.getElementById('users-filter-role');
+    const status = document.getElementById('users-filter-status');
+    if (search) search.addEventListener('input', applyUserFilters);
+    if (role) role.addEventListener('change', applyUserFilters);
+    if (status) status.addEventListener('change', applyUserFilters);
+}
+
+function bindChartFilters() {
+    const sel = document.getElementById('appointments-range-select');
+    if (sel) sel.addEventListener('change', () => renderAppointmentsChart());
+}
+
+function bindSettingsPrefs() {
+    const keys = [
+        ['pref-email-notif', 'admin_pref_email'],
+        ['pref-sms-alerts', 'admin_pref_sms'],
+        ['pref-maintenance', 'admin_pref_maint']
+    ];
+    keys.forEach(([id, key]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const saved = localStorage.getItem(key);
+        if (saved !== null) el.checked = saved === '1';
+        el.addEventListener('change', () => localStorage.setItem(key, el.checked ? '1' : '0'));
+    });
 }
 
 async function loadCaretakers() {
     const grid = document.getElementById('caretakers-grid');
     try {
-        const response = await api('/admin/caretakers');
+        const response = await api('/admin/caretakers/summary');
         allCaretakers = response.ok ? await response.json() : [];
         grid.innerHTML = allCaretakers.map((caretaker) => `
             <div class="caretaker-card">
-                <h4>${caretaker.fullName || caretaker.username || 'Unknown'}</h4>
-                <p>${caretaker.email || 'No email'}</p>
+                <h4>${escapeHtml(caretaker.fullName || caretaker.username || 'Unknown')}</h4>
+                <p>${escapeHtml(caretaker.email || 'No email')}</p>
                 <div style="display:flex; justify-content:space-around; margin-top:16px;">
                     <div>
-                        <strong style="font-size:24px; color:var(--primary);">${caretaker.status || 'Active'}</strong>
+                        <strong style="font-size:24px; color:var(--primary);">${caretaker.patientCount ?? 0}</strong>
+                        <p style="font-size:12px; color:var(--text-secondary); margin:0;">Patients</p>
+                    </div>
+                    <div>
+                        <strong style="font-size:18px; color:var(--text-secondary);">${escapeHtml(caretaker.status || 'Active')}</strong>
                         <p style="font-size:12px; color:var(--text-secondary); margin:0;">Status</p>
                     </div>
                 </div>
                 <div style="display:flex; gap:8px; margin-top:16px;">
-                    <button class="btn-icon" onclick="viewCaretaker('${caretaker.id}')" style="flex:1;">👁️ View</button>
-                    <button class="btn-icon" onclick="editUser('${caretaker.id}')" style="flex:1;">✏️ Edit</button>
+                    <button type="button" class="btn-icon" onclick="viewCaretaker('${caretaker.id}')" style="flex:1;">👁️ View</button>
+                    <button type="button" class="btn-icon" onclick="editUser('${caretaker.id}')" style="flex:1;">✏️ Edit</button>
                 </div>
             </div>
         `).join('') || '<p>No caretakers found.</p>';
@@ -222,10 +377,10 @@ async function loadMedications() {
         allMedications = response.ok ? await response.json() : [];
         tbody.innerHTML = allMedications.map((med) => `
             <tr>
-                <td><strong>${med.medication}</strong></td>
-                <td>${med.patient}</td>
-                <td>${med.dosage || ''}</td>
-                <td>${med.schedule || ''}</td>
+                <td><strong>${escapeHtml(med.medication)}</strong></td>
+                <td>${escapeHtml(med.patient)}</td>
+                <td>${escapeHtml(med.dosage || '')}</td>
+                <td>${escapeHtml(med.schedule || '')}</td>
                 <td>
                     <div style="display:flex; align-items:center; gap:8px;">
                         <div style="flex:1; height:8px; background:#e2e8f0; border-radius:4px; overflow:hidden;">
@@ -235,7 +390,7 @@ async function loadMedications() {
                     </div>
                 </td>
                 <td class="table-actions">
-                    <button class="btn-icon" onclick="editMedication('${med.id}')" title="Edit">✏️</button>
+                    <button type="button" class="btn-icon" onclick="deleteMedicationConfirm('${med.id}')" title="Remove record">🗑️</button>
                 </td>
             </tr>
         `).join('') || '<tr><td colspan="6">No medications found.</td></tr>';
@@ -250,12 +405,14 @@ async function loadAppointments() {
     try {
         const response = await api('/admin/appointments');
         allAppointments = response.ok ? await response.json() : [];
+        allAppointments.sort((a, b) => String(b.date).localeCompare(String(a.date)));
         container.innerHTML = allAppointments.map((apt) => `
             <div class="list-item">
-                <strong>${apt.patientName || 'Unknown Patient'}</strong> - ${apt.date || ''} ${apt.time || ''}<br>
-                <small>${apt.type || 'General'} | ${apt.status || 'Scheduled'}</small>
+                <strong>${escapeHtml(apt.patientName || 'Unknown Patient')}</strong>
+                — ${escapeHtml(apt.date || '')} ${escapeHtml(apt.time || '')}<br>
+                <small>${escapeHtml(apt.type || 'General')} | ${escapeHtml(apt.status || 'Scheduled')}</small>
             </div>
-        `).join('') || '<p>No appointments available.</p>';
+        `).join('') || '<p>No appointments yet.</p>';
     } catch (error) {
         console.error('Error loading appointments:', error);
         container.innerHTML = '<p>Unable to load appointments.</p>';
@@ -266,28 +423,62 @@ async function loadReports() {
     try {
         const response = await api('/admin/reports');
         if (!response.ok) return;
-        const report = await response.json();
+        lastReport = await response.json();
 
         const usersCtx = document.getElementById('users-chart').getContext('2d');
         if (usersChartRef) usersChartRef.destroy();
         usersChartRef = new Chart(usersCtx, {
             type: 'bar',
             data: {
-                labels: ['Total Users', 'Active Users', 'Caretakers', 'Patients'],
-                datasets: [{ label: 'Users', data: [report.users.total, report.users.active, allCaretakers.length, Number(document.querySelector('.stat-card.patients h3').textContent) || 0], backgroundColor: '#3b82f6' }]
+                labels: ['Total users', 'Active users', 'Medications (total)', 'Appointments (total)'],
+                datasets: [{
+                    label: 'Counts',
+                    data: [
+                        lastReport.users.total,
+                        lastReport.users.active,
+                        lastReport.medications.total,
+                        lastReport.appointments.total
+                    ],
+                    backgroundColor: '#3b82f6'
+                }]
             },
-            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: { y: { beginAtZero: true } }
+            }
         });
 
         const adherenceCtx = document.getElementById('adherence-chart').getContext('2d');
-        if (adherenceChartRef) adherenceChartRef.destroy();
-        adherenceChartRef = new Chart(adherenceCtx, {
-            type: 'line',
+        if (adherenceBarChartRef) adherenceBarChartRef.destroy();
+        adherenceBarChartRef = new Chart(adherenceCtx, {
+            type: 'bar',
             data: {
-                labels: ['Taken', 'Pending', 'Missed', 'Adherence %'],
-                datasets: [{ label: 'Medication Metrics', data: [report.adherence.taken, report.adherence.pending, report.adherence.missed, report.adherence.rate], borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)', tension: 0.4, fill: true }]
+                labels: ['Taken doses', 'Pending', 'Missed', 'Adherence %'],
+                datasets: [{
+                    label: 'Medication logs',
+                    data: [
+                        lastReport.adherence.taken,
+                        lastReport.adherence.pending,
+                        lastReport.adherence.missed,
+                        lastReport.adherence.rate
+                    ],
+                    backgroundColor: ['#10b981', '#f59e0b', '#ef4444', '#3b82f6']
+                }]
             },
-            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    title: {
+                        display: true,
+                        text: `Generated ${lastReport.generatedAt || ''}`
+                    }
+                },
+                scales: { y: { beginAtZero: true } }
+            }
         });
     } catch (error) {
         console.error('Error loading reports:', error);
@@ -302,7 +493,7 @@ async function addUser() {
     if (!email) return;
     const password = prompt('Temporary Password (min 6 chars):');
     if (!password) return;
-    const role = prompt('Role (Elderly User/Caregiver/Admin):', 'Elderly User') || 'Elderly User';
+    const role = prompt('Role (Elderly User / Caregiver / Admin):', 'Elderly User') || 'Elderly User';
 
     try {
         const response = await api('/admin/users', {
@@ -322,15 +513,18 @@ async function addUser() {
 }
 
 async function editUser(id) {
-    const user = allUsers.find((u) => u.id === id);
-    if (!user) return;
+    const user = findUserById(id);
+    if (!user) {
+        alert('User not found in loaded data. Open Users tab and try again.');
+        return;
+    }
     const fullName = prompt('Full Name:', user.fullName || user.username || '');
     if (fullName === null) return;
     const email = prompt('Email:', user.email || '');
     if (email === null) return;
     const status = prompt('Status (Active/Inactive):', user.status || 'Active');
     if (status === null) return;
-    const role = prompt('Role (Elderly User/Caregiver/Admin):', user.role || 'Elderly User');
+    const role = prompt('Role (Elderly User / Caregiver / Admin):', user.role || 'Elderly User');
     if (role === null) return;
 
     try {
@@ -352,6 +546,18 @@ async function editUser(id) {
 
 async function deleteUserConfirm(id) {
     if (!confirm('Are you sure you want to delete this user?')) return;
+    try {
+        const meRes = await api('/auth/me');
+        if (meRes.ok) {
+            const me = await meRes.json();
+            if (me.id === id) {
+                alert('You cannot delete your own account while signed in.');
+                return;
+            }
+        }
+    } catch (e) {
+        /* ignore */
+    }
     try {
         const response = await api(`/admin/users/${id}`, { method: 'DELETE' });
         if (response.ok) {
@@ -397,41 +603,99 @@ async function addUserWithRole(role) {
 function viewCaretaker(id) {
     const caretaker = allCaretakers.find((c) => c.id === id);
     if (!caretaker) return;
-    alert(`Name: ${caretaker.fullName || caretaker.username}\nEmail: ${caretaker.email || 'N/A'}\nStatus: ${caretaker.status || 'Active'}`);
-}
-
-function editCaretaker(id) {
-    editUser(id);
+    alert(
+        `Name: ${caretaker.fullName || caretaker.username}\nEmail: ${caretaker.email || 'N/A'}\nStatus: ${caretaker.status || 'Active'}\nPatients: ${caretaker.patientCount ?? 0}`
+    );
 }
 
 function addMedication() {
-    alert('Use caretaker portal to assign medications to patients.');
+    window.open('/caretaker', '_blank');
 }
 
-function editMedication(id) {
-    alert(`Medication ID: ${id}\nMedication edits are managed in patient/caretaker flows.`);
+async function deleteMedicationConfirm(id) {
+    if (!confirm('Delete this medication record from the database?')) return;
+    try {
+        const response = await api(`/admin/medications/${id}`, { method: 'DELETE' });
+        if (response.ok) {
+            await loadMedications();
+            await loadDashboardStats();
+            if (lastReport) await loadReports();
+        } else {
+            alert('Could not delete medication');
+        }
+    } catch (e) {
+        console.error(e);
+    }
 }
 
-function deleteMedication() {
-    alert('Medication removal is restricted to caretaker/patient workflow.');
-}
+async function scheduleAppointment() {
+    if (!allCaretakers.length) {
+        alert('No caregivers in the system yet. Add a caregiver first.');
+        return;
+    }
+    const lines = allCaretakers.map((c, i) => `${i + 1}. ${c.fullName || c.username} (${c.email || 'no email'})`).join('\n');
+    const pick = prompt(`Pick caregiver by number:\n${lines}`);
+    if (!pick) return;
+    const idx = parseInt(pick, 10) - 1;
+    if (idx < 0 || idx >= allCaretakers.length) {
+        alert('Invalid selection');
+        return;
+    }
+    const cg = allCaretakers[idx];
+    const patientName = prompt('Patient name for appointment:');
+    if (!patientName) return;
+    const date = prompt('Date (YYYY-MM-DD):', new Date().toISOString().slice(0, 10));
+    if (!date) return;
+    const time = prompt('Time (e.g. 10:30 or 10:30 AM):', '09:00') || '';
+    const type = prompt('Type (Checkup / Follow-up / Emergency):', 'Checkup') || 'Checkup';
 
-function scheduleAppointment() {
-    alert('Appointment scheduling is handled by caretaker portal.');
+    try {
+        const response = await api('/admin/appointments', {
+            method: 'POST',
+            body: JSON.stringify({
+                caretakerId: cg.id,
+                patientName,
+                date,
+                time,
+                type,
+                status: 'Scheduled'
+            })
+        });
+        if (response.ok) {
+            alert('Appointment created');
+            await refreshAdminData();
+            switchSection('appointments');
+        } else {
+            const err = await response.json().catch(() => ({}));
+            alert(err.error || 'Failed to create appointment');
+        }
+    } catch (e) {
+        console.error(e);
+    }
 }
 
 async function generateReport() {
     await loadReports();
-    alert('Report refreshed with latest backend data.');
+    switchSection('reports');
 }
 
 function toggleNotifications() {
     switchSection('dashboard');
-    document.getElementById('activity-feed').scrollIntoView({ behavior: 'smooth' });
+    const feed = document.getElementById('activity-feed');
+    if (feed) feed.scrollIntoView({ behavior: 'smooth' });
 }
 
-function toggleProfileMenu() {
-    alert('Admin profile menu coming soon.');
+async function toggleProfileMenu() {
+    try {
+        const res = await api('/auth/me');
+        if (!res.ok) return;
+        const me = await res.json();
+        alert(
+            `Signed in as: ${me.fullName || me.username}\nEmail: ${me.email || '—'}\nRole: ${me.role}\nStatus: ${me.status || '—'}`
+        );
+    } catch (e) {
+        alert('Could not load profile');
+    }
 }
 
 async function logout() {
@@ -442,24 +706,17 @@ async function logout() {
         console.error('Logout call failed:', err);
     }
     localStorage.removeItem('authToken');
+    localStorage.removeItem('userRole');
     window.location.href = '/';
 }
 
 function bindSearch() {
     const input = document.getElementById('admin-search');
+    const usersInput = document.getElementById('users-search-input');
     if (!input) return;
     input.addEventListener('input', (e) => {
-        const query = e.target.value.toLowerCase().trim();
-        if (!query) {
-            renderUsers(allUsers);
-            return;
-        }
-        const filtered = allUsers.filter((u) =>
-            (u.username || '').toLowerCase().includes(query) ||
-            (u.fullName || '').toLowerCase().includes(query) ||
-            (u.email || '').toLowerCase().includes(query)
-        );
-        renderUsers(filtered);
+        if (usersInput) usersInput.value = e.target.value;
+        applyUserFilters();
     });
 }
 
@@ -473,4 +730,7 @@ async function refreshAdminData() {
         loadActivityFeed()
     ]);
     renderDashboardCharts();
+    if (document.getElementById('reports-section')?.classList.contains('active')) {
+        await loadReports();
+    }
 }

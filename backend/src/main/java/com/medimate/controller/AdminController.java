@@ -1,9 +1,11 @@
 package com.medimate.controller;
 
+import com.medimate.model.Appointment;
 import com.medimate.model.User;
 import com.medimate.repo.AppointmentRepository;
 import com.medimate.repo.MedicationLogRepository;
 import com.medimate.repo.MedicationRepository;
+import com.medimate.repo.PatientRepository;
 import com.medimate.repo.UserRepository;
 import com.medimate.service.AuthService;
 import com.medimate.service.DailyDoseGenerator;
@@ -13,6 +15,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +30,7 @@ public class AdminController {
     private final AppointmentRepository appointmentRepository;
     private final MedicationRepository medicationRepository;
     private final MedicationLogRepository medicationLogRepository;
+    private final PatientRepository patientRepository;
     private final TokenService tokenService;
     private final AuthService authService;
     private final DailyDoseGenerator doseGenerator;
@@ -35,6 +39,7 @@ public class AdminController {
                            AppointmentRepository appointmentRepository,
                            MedicationRepository medicationRepository,
                            MedicationLogRepository medicationLogRepository,
+                           PatientRepository patientRepository,
                            TokenService tokenService,
                            AuthService authService,
                            DailyDoseGenerator doseGenerator) {
@@ -42,6 +47,7 @@ public class AdminController {
         this.appointmentRepository = appointmentRepository;
         this.medicationRepository = medicationRepository;
         this.medicationLogRepository = medicationLogRepository;
+        this.patientRepository = patientRepository;
         this.tokenService = tokenService;
         this.authService = authService;
         this.doseGenerator = doseGenerator;
@@ -179,6 +185,75 @@ public class AdminController {
 
         List<User> caretakers = userRepository.findByRole("Caregiver");
         return ResponseEntity.ok(caretakers);
+    }
+
+    /** Caregivers with assigned patient counts (for admin dashboard). */
+    @GetMapping("/caretakers/summary")
+    public ResponseEntity<?> getCaretakersSummary(@RequestHeader("X-Auth-Token") String token) {
+        ResponseEntity<?> authErr = requireAdmin(token);
+        if (authErr != null) return authErr;
+
+        List<User> caretakers = userRepository.findByRole("Caregiver");
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (User c : caretakers) {
+            long patientCount = patientRepository.countByCaretakerId(c.getId());
+            Map<String, Object> row = new HashMap<>();
+            row.put("id", c.getId());
+            row.put("fullName", c.getFullName());
+            row.put("username", c.getUsername());
+            row.put("email", c.getEmail());
+            row.put("status", c.getStatus());
+            row.put("patientCount", patientCount);
+            rows.add(row);
+        }
+        return ResponseEntity.ok(rows);
+    }
+
+    @DeleteMapping("/medications/{id}")
+    public ResponseEntity<?> deleteMedication(@RequestHeader("X-Auth-Token") String token,
+                                              @PathVariable String id) {
+        ResponseEntity<?> authErr = requireAdmin(token);
+        if (authErr != null) return authErr;
+
+        return medicationRepository.findById(id)
+                .map(m -> {
+                    medicationRepository.delete(m);
+                    return ResponseEntity.noContent().build();
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    /** Create an appointment for a caregiver (admin). */
+    @PostMapping("/appointments")
+    public ResponseEntity<?> createAppointment(@RequestHeader("X-Auth-Token") String token,
+                                               @RequestBody Map<String, String> body) {
+        ResponseEntity<?> authErr = requireAdmin(token);
+        if (authErr != null) return authErr;
+
+        String caretakerId = body.get("caretakerId");
+        String patientName = body.get("patientName");
+        String date = body.get("date");
+        String time = body.get("time");
+        if (caretakerId == null || caretakerId.isBlank() || patientName == null || patientName.isBlank()
+                || date == null || date.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "caretakerId, patientName, and date are required"));
+        }
+        Optional<User> caretakerOpt = userRepository.findById(caretakerId.trim())
+                .filter(u -> "Caregiver".equals(u.getRole()));
+        if (caretakerOpt.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Invalid caretaker id"));
+        }
+        User cg = caretakerOpt.get();
+        Appointment a = new Appointment();
+        a.setCaretakerId(cg.getId());
+        a.setPatientName(patientName.trim());
+        a.setDate(date.trim());
+        a.setTime(time != null ? time.trim() : "");
+        a.setType(body.getOrDefault("type", "Checkup"));
+        a.setStatus(body.getOrDefault("status", "Scheduled"));
+        a.setNotes(body.get("notes"));
+        Appointment saved = appointmentRepository.save(a);
+        return ResponseEntity.ok(saved);
     }
 
     @GetMapping("/appointments")

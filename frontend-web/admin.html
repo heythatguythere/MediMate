@@ -55,20 +55,20 @@
         <!-- Top Header Bar -->
         <header class="top-header">
             <div class="header-left">
-                <h1>Welcome back, Admin 👋</h1>
-                <p class="header-subtitle">Here's what's happening today</p>
+                <h1>Welcome back, <span id="admin-display-name">Admin</span> 👋</h1>
+                <p class="header-subtitle" id="admin-header-subtitle">Live data from your MediMate database</p>
             </div>
             <div class="header-right">
                 <div class="search-box">
-                    <input type="search" placeholder="🔍 Search..." id="admin-search">
+                    <input type="search" placeholder="🔍 Search users (global)..." id="admin-search">
                 </div>
-                <button class="icon-btn notification-btn" onclick="toggleNotifications()">
-                    <span class="badge">5</span>
+                <button type="button" class="icon-btn notification-btn" onclick="toggleNotifications()" title="Recent activity">
+                    <span class="badge" id="admin-notif-badge">0</span>
                     🔔
                 </button>
-                <div class="admin-profile" onclick="toggleProfileMenu()">
+                <div class="admin-profile" onclick="toggleProfileMenu()" title="Signed-in account">
                     <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%233b82f6'/%3E%3Ctext x='50' y='50' text-anchor='middle' dy='.3em' fill='white' font-size='40' font-family='Arial'%3EA%3C/text%3E%3C/svg%3E" alt="Admin">
-                    <span>Admin</span>
+                    <span id="admin-profile-label">Admin</span>
                 </div>
             </div>
         </header>
@@ -81,33 +81,33 @@
                     <div class="stat-card patients">
                         <div class="stat-icon">🧍‍♂️</div>
                         <div class="stat-info">
-                            <h3>128</h3>
-                            <p>Active Patients</p>
-                            <span class="stat-change positive">+12% this month</span>
+                            <h3 id="stat-elderly">—</h3>
+                            <p>Elderly users</p>
+                            <span class="stat-change neutral" id="stat-elderly-sub">Loading…</span>
                         </div>
                     </div>
                     <div class="stat-card caretakers">
                         <div class="stat-icon">👩‍⚕️</div>
                         <div class="stat-info">
-                            <h3>42</h3>
-                            <p>Registered Caretakers</p>
-                            <span class="stat-change positive">+5 new</span>
+                            <h3 id="stat-caretakers">—</h3>
+                            <p>Caregivers</p>
+                            <span class="stat-change neutral" id="stat-caretakers-sub">Loading…</span>
                         </div>
                     </div>
                     <div class="stat-card appointments">
                         <div class="stat-icon">📅</div>
                         <div class="stat-info">
-                            <h3>312</h3>
-                            <p>Total Appointments</p>
-                            <span class="stat-change neutral">24 today</span>
+                            <h3 id="stat-appointments">—</h3>
+                            <p>Appointments</p>
+                            <span class="stat-change neutral" id="stat-appointments-sub">Loading…</span>
                         </div>
                     </div>
                     <div class="stat-card medications">
                         <div class="stat-icon">💊</div>
                         <div class="stat-info">
-                            <h3>978</h3>
-                            <p>Medications Tracked</p>
-                            <span class="stat-change positive">+8% adherence</span>
+                            <h3 id="stat-medications">—</h3>
+                            <p>Medications</p>
+                            <span class="stat-change neutral" id="stat-medications-sub">Loading…</span>
                         </div>
                     </div>
                 </div>
@@ -117,11 +117,12 @@
                     <!-- Analytics Charts -->
                     <div class="chart-card">
                         <div class="card-header">
-                            <h3>📈 Appointments Per Week</h3>
-                            <select class="time-filter">
-                                <option>Last 7 days</option>
-                                <option>Last 30 days</option>
-                                <option>Last 3 months</option>
+                            <h3>📈 Appointments by weekday</h3>
+                            <select class="time-filter" id="appointments-range-select" title="Filter chart by date range">
+                                <option value="7">Last 7 days</option>
+                                <option value="30">Last 30 days</option>
+                                <option value="90">Last 90 days</option>
+                                <option value="all">All time</option>
                             </select>
                         </div>
                         <canvas id="appointments-chart"></canvas>
@@ -129,7 +130,7 @@
 
                     <div class="chart-card">
                         <div class="card-header">
-                            <h3>🩺 Caretakers by Department</h3>
+                            <h3>🩺 Caregivers by patient load</h3>
                         </div>
                         <canvas id="caretakers-chart"></canvas>
                     </div>
@@ -138,7 +139,7 @@
                     <div class="activity-card">
                         <div class="card-header">
                             <h3>📋 Recent Activity</h3>
-                            <button class="btn-link">View All</button>
+                            <button type="button" class="btn-link" onclick="switchSection('users')">View users</button>
                         </div>
                         <div class="activity-feed" id="activity-feed"></div>
                     </div>
@@ -174,16 +175,17 @@
                 </div>
                 <div class="table-card">
                     <div class="table-filters">
-                        <input type="search" placeholder="Search users..." class="search-input">
-                        <select class="filter-select">
-                            <option>All Roles</option>
-                            <option>Elderly User</option>
-                            <option>Caregiver</option>
+                        <input type="search" placeholder="Search users..." class="search-input" id="users-search-input">
+                        <select class="filter-select" id="users-filter-role">
+                            <option value="">All Roles</option>
+                            <option value="Elderly User">Elderly User</option>
+                            <option value="Caregiver">Caregiver</option>
+                            <option value="Admin">Admin</option>
                         </select>
-                        <select class="filter-select">
-                            <option>All Status</option>
-                            <option>Active</option>
-                            <option>Inactive</option>
+                        <select class="filter-select" id="users-filter-status">
+                            <option value="">All Status</option>
+                            <option value="Active">Active</option>
+                            <option value="Inactive">Inactive</option>
                         </select>
                     </div>
                     <table class="data-table" id="users-table">
@@ -269,20 +271,21 @@
                 </div>
                 <div class="settings-grid">
                     <div class="settings-card">
-                        <h3>System Settings</h3>
+                        <h3>Admin preferences</h3>
+                        <p class="settings-hint">These options are saved in this browser only (not synced to the server).</p>
                         <div class="setting-item">
                             <label>
-                                <input type="checkbox" checked> Email Notifications
+                                <input type="checkbox" id="pref-email-notif" checked> Email Notifications (reminder)
                             </label>
                         </div>
                         <div class="setting-item">
                             <label>
-                                <input type="checkbox" checked> SMS Alerts
+                                <input type="checkbox" id="pref-sms-alerts" checked> SMS Alerts (reminder)
                             </label>
                         </div>
                         <div class="setting-item">
                             <label>
-                                <input type="checkbox"> Maintenance Mode
+                                <input type="checkbox" id="pref-maintenance"> Show maintenance banner on landing
                             </label>
                         </div>
                     </div>
