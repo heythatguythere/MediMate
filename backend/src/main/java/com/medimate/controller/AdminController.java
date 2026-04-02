@@ -354,6 +354,7 @@ public class AdminController {
                     "patient", owner != null ? (owner.getFullName() != null ? owner.getFullName() : owner.getUsername()) : "Unknown",
                     "dosage", med.getDosage() != null ? med.getDosage() : "",
                     "schedule", med.getSchedule() != null ? med.getSchedule() : "",
+                    "active", med.isActive(),
                     "adherence", adherence
             );
         }).toList();

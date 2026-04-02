@@ -13,16 +13,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const urlParams = new URLSearchParams(window.location.search);
     const forceLogin = urlParams.get('login') !== null;
     
-    // If forcing login from landing page, clear any existing session
+    // If ?login is present but the user is already logged in,
+    // keep the session for instant access and just remove the query param.
     if (forceLogin && authToken) {
-        authToken = null;
-        localStorage.removeItem('authToken');
-        localStorage.removeItem('userRole');
-        localStorage.removeItem('username');
+        window.history.replaceState({}, document.title, window.location.pathname);
     }
     
-    // Only auto-redirect if token exists AND we're not forcing login
-    if (authToken && !forceLogin) {
+    // Auto-redirect if token exists (regardless of ?login).
+    if (authToken) {
         const userRole = localStorage.getItem('userRole');
         
         // Redirect based on role (Admin users go to admin portal)

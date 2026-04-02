@@ -284,7 +284,7 @@
             const urlParams = new URLSearchParams(window.location.search);
             const forceLogin = urlParams.get('login') !== null;
             
-            if (token && !forceLogin) {
+            if (token) {
                 if (userRole && String(userRole).toLowerCase() === 'admin') {
                     window.location.replace('/admin');
                 } else if (userRole === 'Caregiver') {

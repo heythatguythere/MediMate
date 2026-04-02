@@ -300,6 +300,21 @@
         </main>
     </div>
 
+    <!-- Admin Modal (used instead of prompt/confirm alerts) -->
+    <div id="admin-modal-overlay" class="admin-modal-overlay" style="display:none;" role="dialog" aria-modal="true">
+        <div class="admin-modal">
+            <div class="admin-modal-header">
+                <h2 id="admin-modal-title">Modal</h2>
+                <button type="button" class="admin-modal-close" onclick="closeAdminModal()" aria-label="Close">✕</button>
+            </div>
+            <div id="admin-modal-body" class="admin-modal-body"></div>
+            <div class="admin-modal-footer">
+                <button type="button" class="btn-secondary" onclick="closeAdminModal()" id="admin-modal-cancel">Cancel</button>
+                <button type="button" class="btn-primary" id="admin-modal-confirm">Confirm</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/js/admin.js"></script>
 </body>
 </html>

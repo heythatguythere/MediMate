@@ -399,6 +399,90 @@ body {
     height: 260px !important;
 }
 
+/* Admin Modal */
+.admin-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 5000;
+}
+
+.admin-modal {
+    width: min(720px, 92vw);
+    background: var(--card-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.35);
+    padding: 18px;
+}
+
+.admin-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.admin-modal-header h2 {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--text);
+}
+
+.admin-modal-close {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 18px;
+    transition: all 0.2s ease;
+}
+
+.admin-modal-close:hover {
+    transform: translateY(-1px);
+    border-color: rgba(59,130,246,0.35);
+}
+
+.admin-modal-body label {
+    display: block;
+    margin-top: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+.admin-modal-body input,
+.admin-modal-body select,
+.admin-modal-body textarea {
+    width: 100%;
+    margin-top: 6px;
+    padding: 10px 12px;
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+    color: var(--text);
+    outline: none;
+}
+
+.admin-modal-body textarea {
+    min-height: 90px;
+    resize: vertical;
+}
+
+.admin-modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 16px;
+}
+
 .card-header {
     display: flex;
     justify-content: space-between;
