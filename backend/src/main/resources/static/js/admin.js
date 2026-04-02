@@ -50,6 +50,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         loadActivityFeed()
     ]);
     renderDashboardCharts();
+
+    // Close notifications dropdown on outside clicks.
+    document.addEventListener('click', (e) => {
+        const dropdown = document.getElementById('admin-notif-dropdown');
+        if (!dropdown) return;
+        const btn = document.querySelector('.notification-btn');
+        if (!btn) return;
+        if (dropdown.style.display !== 'block') return;
+        const clickedInside = dropdown.contains(e.target) || btn.contains(e.target);
+        if (!clickedInside) dropdown.style.display = 'none';
+    });
 });
 
 async function api(path, options = {}) {
@@ -113,6 +124,10 @@ function switchSection(sectionName) {
         .find((btn) => btn.getAttribute('onclick') === `switchSection('${sectionName}')`);
     if (navButton) navButton.classList.add('active');
 
+    if (sectionName === 'dashboard') {
+        // Charts can look wrong after hidden -> visible transitions; re-render.
+        renderDashboardCharts();
+    }
     if (sectionName === 'reports') {
         loadReports();
     }
@@ -328,15 +343,23 @@ function bindSettingsPrefs() {
     const keys = [
         ['pref-email-notif', 'admin_pref_email'],
         ['pref-sms-alerts', 'admin_pref_sms'],
-        ['pref-maintenance', 'admin_pref_maint']
+        ['pref-maintenance', 'admin_pref_maint'],
+        ['pref-dark-mode', 'admin_pref_dark_mode']
     ];
     keys.forEach(([id, key]) => {
         const el = document.getElementById(id);
         if (!el) return;
         const saved = localStorage.getItem(key);
         if (saved !== null) el.checked = saved === '1';
-        el.addEventListener('change', () => localStorage.setItem(key, el.checked ? '1' : '0'));
+        el.addEventListener('change', () => {
+            localStorage.setItem(key, el.checked ? '1' : '0');
+            if (id === 'pref-dark-mode') document.body.classList.toggle('dark', el.checked);
+        });
     });
+
+    // Apply initial dark mode preference.
+    const darkPref = localStorage.getItem('admin_pref_dark_mode') === '1';
+    if (darkPref) document.body.classList.add('dark');
 }
 
 async function loadCaretakers() {
@@ -361,6 +384,7 @@ async function loadCaretakers() {
                 <div style="display:flex; gap:8px; margin-top:16px;">
                     <button type="button" class="btn-icon" onclick="viewCaretaker('${caretaker.id}')" style="flex:1;">👁️ View</button>
                     <button type="button" class="btn-icon" onclick="editUser('${caretaker.id}')" style="flex:1;">✏️ Edit</button>
+                    <button type="button" class="btn-icon" onclick="deleteUserConfirm('${caretaker.id}')" style="flex:1;">🗑️ Delete</button>
                 </div>
             </div>
         `).join('') || '<p>No caretakers found.</p>';
@@ -390,7 +414,8 @@ async function loadMedications() {
                     </div>
                 </td>
                 <td class="table-actions">
-                    <button type="button" class="btn-icon" onclick="deleteMedicationConfirm('${med.id}')" title="Remove record">🗑️</button>
+                    <button type="button" class="btn-icon" onclick="editMedication('${med.id}')" title="Edit">✏️</button>
+                    <button type="button" class="btn-icon" onclick="deleteMedicationConfirm('${med.id}')" title="Delete">🗑️</button>
                 </td>
             </tr>
         `).join('') || '<tr><td colspan="6">No medications found.</td></tr>';
@@ -411,6 +436,10 @@ async function loadAppointments() {
                 <strong>${escapeHtml(apt.patientName || 'Unknown Patient')}</strong>
                 — ${escapeHtml(apt.date || '')} ${escapeHtml(apt.time || '')}<br>
                 <small>${escapeHtml(apt.type || 'General')} | ${escapeHtml(apt.status || 'Scheduled')}</small>
+                <div style="display:flex; gap:8px; margin-top:10px;">
+                    <button type="button" class="btn-icon" onclick="editAppointment('${apt.id}')" style="flex:1;">✏️ Edit</button>
+                    <button type="button" class="btn-icon" onclick="deleteAppointmentConfirm('${apt.id}')" style="flex:1;">🗑️ Delete</button>
+                </div>
             </div>
         `).join('') || '<p>No appointments yet.</p>';
     } catch (error) {
@@ -612,6 +641,48 @@ function addMedication() {
     window.open('/caretaker', '_blank');
 }
 
+async function editMedication(id) {
+    const med = allMedications.find((m) => m.id === id);
+    if (!med) {
+        alert('Medication not found in loaded data.');
+        return;
+    }
+
+    const name = prompt('Medication name:', med.medication);
+    if (name === null) return;
+    const dosage = prompt('Dosage:', med.dosage || '');
+    if (dosage === null) return;
+    const schedule = prompt('Schedule:', med.schedule || '');
+    if (schedule === null) return;
+    const active = confirm('Set medication as active? (OK = active, Cancel = inactive)');
+
+    try {
+        const response = await api(`/admin/medications/${id}`, {
+            method: 'PUT',
+            body: JSON.stringify({
+                name,
+                dosage,
+                schedule,
+                active
+            })
+        });
+
+        if (response.ok) {
+            await loadMedications();
+            await loadDashboardStats();
+            if (document.getElementById('reports-section')?.classList.contains('active')) {
+                await loadReports();
+            }
+        } else {
+            const err = await response.json().catch(() => ({}));
+            alert(err.error || 'Failed to update medication');
+        }
+    } catch (e) {
+        console.error(e);
+        alert('Error updating medication');
+    }
+}
+
 async function deleteMedicationConfirm(id) {
     if (!confirm('Delete this medication record from the database?')) return;
     try {
@@ -674,6 +745,76 @@ async function scheduleAppointment() {
     }
 }
 
+async function editAppointment(id) {
+    const apt = allAppointments.find((a) => a.id === id);
+    if (!apt) {
+        alert('Appointment not found in loaded data.');
+        return;
+    }
+
+    const patientName = prompt('Patient name:', apt.patientName || '');
+    if (patientName === null) return;
+    const date = prompt('Date (YYYY-MM-DD):', apt.date || '');
+    if (date === null) return;
+    const time = prompt('Time:', apt.time || '');
+    if (time === null) return;
+    const type = prompt('Type (Checkup / Follow-up / Emergency):', apt.type || 'Checkup');
+    if (type === null) return;
+    const status = prompt('Status (Scheduled / Completed / Cancelled):', apt.status || 'Scheduled');
+    if (status === null) return;
+    const notes = prompt('Notes (optional):', apt.notes || '');
+    if (notes === null) return;
+
+    try {
+        const response = await api(`/admin/appointments/${id}`, {
+            method: 'PUT',
+            body: JSON.stringify({
+                patientName,
+                date,
+                time,
+                type,
+                status,
+                notes
+            })
+        });
+
+        if (response.ok) {
+            await loadAppointments();
+            await loadDashboardStats();
+            if (document.getElementById('reports-section')?.classList.contains('active')) {
+                await loadReports();
+            }
+            renderDashboardCharts();
+        } else {
+            const err = await response.json().catch(() => ({}));
+            alert(err.error || 'Failed to update appointment');
+        }
+    } catch (e) {
+        console.error(e);
+        alert('Error updating appointment');
+    }
+}
+
+async function deleteAppointmentConfirm(id) {
+    if (!confirm('Delete this appointment?')) return;
+    try {
+        const response = await api(`/admin/appointments/${id}`, { method: 'DELETE' });
+        if (response.ok) {
+            await loadAppointments();
+            await loadDashboardStats();
+            if (document.getElementById('reports-section')?.classList.contains('active')) {
+                await loadReports();
+            }
+            renderDashboardCharts();
+        } else {
+            alert('Failed to delete appointment');
+        }
+    } catch (e) {
+        console.error(e);
+        alert('Error deleting appointment');
+    }
+}
+
 async function generateReport() {
     await loadReports();
     switchSection('reports');
@@ -681,8 +822,20 @@ async function generateReport() {
 
 function toggleNotifications() {
     switchSection('dashboard');
-    const feed = document.getElementById('activity-feed');
-    if (feed) feed.scrollIntoView({ behavior: 'smooth' });
+    const dropdown = document.getElementById('admin-notif-dropdown');
+    if (!dropdown) return;
+
+    const activityFeed = document.getElementById('activity-feed');
+    if (activityFeed && dropdown.innerHTML.trim() === '') {
+        dropdown.innerHTML = activityFeed.innerHTML;
+    }
+
+    const isOpen = dropdown.style.display === 'block';
+    dropdown.style.display = isOpen ? 'none' : 'block';
+
+    // When opening, reset badge to 0 (no backend "read" endpoint for admin activity yet).
+    const badge = document.getElementById('admin-notif-badge');
+    if (badge && dropdown.style.display === 'block') badge.textContent = '0';
 }
 
 async function toggleProfileMenu() {

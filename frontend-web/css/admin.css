@@ -18,6 +18,15 @@
     --sidebar-bg: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
 }
 
+.dark {
+    --bg: #0b1220;
+    --card-bg: #0f172a;
+    --text: #e5e7eb;
+    --text-secondary: #94a3b8;
+    --border: #22304a;
+    --sidebar-bg: linear-gradient(180deg, #0f172a 0%, #0b1220 100%);
+}
+
 body {
     font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
     background: var(--bg);
@@ -147,6 +156,7 @@ body {
     display: flex;
     align-items: center;
     gap: 16px;
+    position: relative;
 }
 
 .search-box {
@@ -223,6 +233,26 @@ body {
 .admin-profile span {
     font-weight: 600;
     font-size: 14px;
+}
+
+/* Notification dropdown (uses the activity feed data) */
+.admin-notif-dropdown {
+    position: absolute;
+    right: 0;
+    top: 54px;
+    width: 360px;
+    max-height: 52vh;
+    overflow-y: auto;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+    padding: 12px;
+    z-index: 2000;
+}
+
+.admin-notif-dropdown .activity-item {
+    margin-bottom: 10px;
 }
 
 /* Content Area */
@@ -357,6 +387,16 @@ body {
     padding: 24px;
     border-radius: 16px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+}
+
+/* Chart sizing: ensures graphs render with enough height on Render */
+.chart-card canvas {
+    width: 100% !important;
+    height: 320px !important;
+}
+
+.reports-grid .chart-card canvas {
+    height: 260px !important;
 }
 
 .card-header {

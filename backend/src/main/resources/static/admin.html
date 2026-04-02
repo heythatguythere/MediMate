@@ -66,6 +66,7 @@
                     <span class="badge" id="admin-notif-badge">0</span>
                     🔔
                 </button>
+                <div id="admin-notif-dropdown" class="admin-notif-dropdown" style="display:none;"></div>
                 <div class="admin-profile" onclick="toggleProfileMenu()" title="Signed-in account">
                     <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%233b82f6'/%3E%3Ctext x='50' y='50' text-anchor='middle' dy='.3em' fill='white' font-size='40' font-family='Arial'%3EA%3C/text%3E%3C/svg%3E" alt="Admin">
                     <span id="admin-profile-label">Admin</span>
@@ -286,6 +287,11 @@
                         <div class="setting-item">
                             <label>
                                 <input type="checkbox" id="pref-maintenance"> Show maintenance banner on landing
+                            </label>
+                        </div>
+                        <div class="setting-item">
+                            <label>
+                                <input type="checkbox" id="pref-dark-mode"> Dark mode
                             </label>
                         </div>
                     </div>

@@ -223,6 +223,37 @@ public class AdminController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    /** Admin: update a medication record (name/dosage/schedule/active). */
+    @PutMapping("/medications/{id}")
+    public ResponseEntity<?> updateMedication(@RequestHeader("X-Auth-Token") String token,
+                                                @PathVariable String id,
+                                                @RequestBody Map<String, Object> updates) {
+        ResponseEntity<?> authErr = requireAdmin(token);
+        if (authErr != null) return authErr;
+
+        return medicationRepository.findById(id)
+                .map(m -> {
+                    if (updates.containsKey("name")) {
+                        Object v = updates.get("name");
+                        if (v != null) m.setName(String.valueOf(v).trim());
+                    }
+                    if (updates.containsKey("dosage")) {
+                        Object v = updates.get("dosage");
+                        if (v != null) m.setDosage(String.valueOf(v).trim());
+                    }
+                    if (updates.containsKey("schedule")) {
+                        Object v = updates.get("schedule");
+                        if (v != null) m.setSchedule(String.valueOf(v).trim());
+                    }
+                    if (updates.containsKey("active")) {
+                        Object v = updates.get("active");
+                        if (v != null) m.setActive(Boolean.parseBoolean(String.valueOf(v)));
+                    }
+                    return ResponseEntity.ok(medicationRepository.save(m));
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
     /** Create an appointment for a caregiver (admin). */
     @PostMapping("/appointments")
     public ResponseEntity<?> createAppointment(@RequestHeader("X-Auth-Token") String token,
@@ -261,6 +292,42 @@ public class AdminController {
         ResponseEntity<?> authErr = requireAdmin(token);
         if (authErr != null) return authErr;
         return ResponseEntity.ok(appointmentRepository.findAll());
+    }
+
+    /** Admin: update an appointment (patientName/date/time/type/status/notes). */
+    @PutMapping("/appointments/{id}")
+    public ResponseEntity<?> updateAppointment(@RequestHeader("X-Auth-Token") String token,
+                                               @PathVariable String id,
+                                               @RequestBody Map<String, String> updates) {
+        ResponseEntity<?> authErr = requireAdmin(token);
+        if (authErr != null) return authErr;
+
+        return appointmentRepository.findById(id)
+                .map(a -> {
+                    if (updates.containsKey("patientName")) a.setPatientName(updates.get("patientName"));
+                    if (updates.containsKey("date")) a.setDate(updates.get("date"));
+                    if (updates.containsKey("time")) a.setTime(updates.get("time"));
+                    if (updates.containsKey("type")) a.setType(updates.get("type"));
+                    if (updates.containsKey("status")) a.setStatus(updates.get("status"));
+                    if (updates.containsKey("notes")) a.setNotes(updates.get("notes"));
+                    return ResponseEntity.ok(appointmentRepository.save(a));
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    /** Admin: delete appointment by id. */
+    @DeleteMapping("/appointments/{id}")
+    public ResponseEntity<?> deleteAppointment(@RequestHeader("X-Auth-Token") String token,
+                                               @PathVariable String id) {
+        ResponseEntity<?> authErr = requireAdmin(token);
+        if (authErr != null) return authErr;
+
+        return appointmentRepository.findById(id)
+                .map(a -> {
+                    appointmentRepository.delete(a);
+                    return ResponseEntity.noContent().build();
+                })
+                .orElse(ResponseEntity.notFound().build());
     }
 
     @GetMapping("/medications")
