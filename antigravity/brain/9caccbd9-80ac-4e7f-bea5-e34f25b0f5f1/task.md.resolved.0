@@ -1,0 +1,4 @@
+# Running the Project
+
+- [ ] Check if the application is running
+- [ ] Start the application via uvicorn if not running

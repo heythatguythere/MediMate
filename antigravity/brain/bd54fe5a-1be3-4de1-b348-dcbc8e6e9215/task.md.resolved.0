@@ -1,0 +1,10 @@
+# Re-brand MediMate as BACKEND
+
+- [ ] Update `landing.css` with new backend brand tokens and geometric structure.
+- [ ] Update `styles.css` with new backend brand tokens and geometric structure.
+- [ ] Update `dashboard.css`, `admin.css`, and `caretaker.css`.
+- [ ] Refactor `landing.html` shapes, hero text, and buttons to use text-based/geometric glyphs.
+- [ ] Refactor `index.html` auth screen and dashboard emojis/UI.
+- [ ] Refactor `admin.html` emojis and UI.
+- [ ] Refactor `caretaker.html` emojis and UI.
+- [ ] Verify functionality and styling across all pages locally.

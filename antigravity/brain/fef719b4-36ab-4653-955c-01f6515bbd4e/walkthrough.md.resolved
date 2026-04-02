@@ -1,0 +1,5995 @@
+# PhishGuard — Implementation Walkthrough
+
+## Summary
+
+Complete overhaul of the phishing email detection system: expanded from 9 to **20 detection engines** in the backend, and fully redesigned the UI from a generic AI-looking template to a professional cybersecurity command-center interface.
+
+---
+
+## Backend Changes
+
+### [fish.py](file:///Users/david/fish/fish.py) — 20 Detection Engines
+
+```diff:fish.py
+import os
+from pathlib import Path
+import re
+import math
+import pickle
+import logging
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+
+import uvicorn
+import requests
+import whois
+import Levenshtein
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from email import message_from_string
+
+# Google API Imports
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+
+logger = logging.getLogger(__name__)
+
+# -------------------------
+# CONFIG
+# -------------------------
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+
+# Whitelisted domains — emails from these are always marked SAFE
+WHITELISTED_DOMAINS = [
+    "klh.edu.in",
+]
+
+BASE_DIR = Path(__file__).resolve().parent
+
+app = FastAPI(title="Phishing Detector API")
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+
+class EmailInput(BaseModel):
+    raw_email: str
+
+
+# -------------------------
+# GMAIL AUTH (IMPROVED)
+# -------------------------
+def get_credentials():
+    creds = None
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            # NOTE: This opens a browser window.
+            # If running on a remote server, use flow.run_console()
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+    return creds
+
+
+# Headers to extract for security analysis
+SECURITY_HEADERS = [
+    'Subject', 'From', 'Reply-To', 'Return-Path',
+    'Authentication-Results', 'Received-SPF',
+    'X-Spam-Status', 'X-Spam-Score',
+    'DKIM-Signature', 'ARC-Authentication-Results',
+]
+
+
+def get_gmail_emails(max_results=5):
+    try:
+        creds = get_credentials()
+        service = build('gmail', 'v1', credentials=creds)
+
+        results = service.users().messages().list(userId='me', maxResults=max_results).execute()
+        messages = results.get('messages', [])
+
+        emails = []
+        for msg in messages:
+            txt = service.users().messages().get(userId='me', id=msg['id']).execute()
+            payload = txt.get('payload', {})
+            headers = payload.get('headers', [])
+
+            # Build a header dict for quick lookup
+            header_dict = {}
+            received_list = []
+            for h in headers:
+                if h['name'] == 'Received':
+                    received_list.append(h['value'])
+                else:
+                    header_dict[h['name']] = h['value']
+
+            subject = header_dict.get('Subject', 'No Subject')
+            sender = header_dict.get('From', 'Unknown Sender')
+
+            # Body extraction
+            body = ""
+            if 'parts' in payload:
+                for part in payload['parts']:
+                    if part['mimeType'] == 'text/plain':
+                        body = part['body'].get('data', "")
+            else:
+                body = payload.get('body', {}).get('data', "")
+
+            # Build a mock email.message for header forensics
+            mock_msg = message_from_string("")
+            for hname in SECURITY_HEADERS:
+                if hname in header_dict:
+                    mock_msg[hname] = header_dict[hname]
+            # Add all Received headers (for hop count analysis)
+            for recv in received_list:
+                mock_msg['Received'] = recv
+
+            emails.append({
+                "subject": subject,
+                "sender": sender,
+                "body": body,
+                "_msg": mock_msg,
+            })
+        return emails
+    except Exception as e:
+        print(f"Gmail Fetch Error: {e}")
+        return []
+
+
+# -------------------------
+# RULE ENGINE & PARSING
+# -------------------------
+def parse_email(raw):
+    msg = message_from_string(raw)
+    subject = msg.get('Subject', '')
+    sender = msg.get('From', '')
+    body = ""
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    body += payload.decode(errors='ignore')
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            body = payload.decode(errors='ignore')
+
+    return subject, sender, body, msg
+
+
+# -------------------------
+# SUSPICIOUS KEYWORDS (grouped by category)
+# -------------------------
+suspicious_words = [
+    # Account threats
+    "urgent", "verify", "account suspended", "click here", "login now",
+    "password reset", "immediate action", "bank alert", "account locked",
+    "account disabled", "account compromised", "unauthorized access",
+    "suspicious activity", "security alert", "unusual sign-in",
+    "confirm your identity", "verify your account", "update your information",
+    "action required", "account verification", "confirm your email",
+    "re-verify", "validate your account", "suspended account",
+    # Financial / payment scams
+    "wire transfer", "money transfer", "western union", "bitcoin",
+    "cryptocurrency", "investment opportunity", "guaranteed returns",
+    "risk-free", "double your money", "financial freedom",
+    "invoice attached", "outstanding payment", "overdue payment",
+    "payment declined", "billing problem", "refund pending",
+    "tax refund", "unclaimed funds", "inheritance",
+    # Prize / lottery scams
+    "congratulations", "you have won", "you've won", "lottery winner",
+    "prize winner", "claim your prize", "free gift", "gift card",
+    "selected winner", "million dollars", "cash prize",
+    # Social engineering / pressure
+    "act now", "limited time", "expires today", "don't miss",
+    "final warning", "last chance", "failure to respond", "within 24 hours",
+    "within 48 hours", "your account will be", "do not ignore",
+    "respond immediately", "time sensitive", "dear customer",
+    "dear user", "dear account holder", "valued customer",
+    # Credential harvesting
+    "sign in", "log in", "click below", "click the link",
+    "update payment", "confirm payment", "enter your details",
+    "social security", "ssn", "date of birth", "credit card number",
+    "routing number", "pin number",
+    # Delivery / package scams
+    "package delivery", "shipment notification", "delivery failed",
+    "track your package", "customs fee", "shipping label",
+]
+
+# Suspicious sender domains (freemail used for impersonation)
+suspicious_sender_domains = [
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+    "aol.com", "mail.com", "yandex.com", "protonmail.com",
+    "zoho.com", "gmx.com", "inbox.com", "icloud.com",
+]
+
+# Brand names commonly impersonated
+impersonated_brands = [
+    "paypal", "apple", "amazon", "netflix", "microsoft", "google",
+    "facebook", "instagram", "whatsapp", "bank of america", "chase",
+    "wells fargo", "citi", "hsbc", "barclays", "irs", "hmrc",
+    "fedex", "ups", "usps", "dhl", "dropbox", "linkedin",
+    "twitter", "spotify", "adobe", "ebay", "walmart", "costco",
+]
+
+# Suspicious TLDs often used in phishing
+suspicious_tlds = [
+    ".xyz", ".top", ".click", ".loan", ".work", ".gq", ".cf",
+    ".tk", ".ml", ".ga", ".buzz", ".icu", ".club", ".info",
+    ".site", ".online", ".live", ".support", ".stream", ".download",
+    ".racing", ".win", ".bid", ".science", ".party", ".review",
+    ".trade", ".date", ".faith", ".accountant", ".cricket",
+]
+
+# URL shortener domains
+url_shorteners = [
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd",
+    "buff.ly", "short.to", "tiny.cc", "rb.gy", "cutt.ly",
+    "shorturl.at", "shrtco.de",
+]
+
+# Urgency regex patterns
+urgency_patterns = [
+    r'(?:act|respond|reply|click|call)\s+(?:now|immediately|asap|today)',
+    r'(?:within|in)\s+\d+\s+(?:hour|minute|day)',
+    r'(?:expire|expir(?:es|ing|ed))\s+(?:soon|today|tomorrow)',
+    r'account\s+(?:will be|has been)\s+(?:closed|suspended|terminated|locked|disabled)',
+    r'(?:final|last)\s+(?:notice|warning|reminder|chance)',
+]
+
+
+def keyword_score(text):
+    text_lower = text.lower()
+    score = 0
+    hits = []
+
+    # Check suspicious words
+    for word in suspicious_words:
+        if word in text_lower:
+            hits.append(word)
+            score += 2
+
+    # Check for impersonated brand names in the body/subject
+    for brand in impersonated_brands:
+        if brand in text_lower:
+            hits.append(f"brand:{brand}")
+            score += 1
+
+    # Check urgency patterns via regex
+    for pattern in urgency_patterns:
+        if re.search(pattern, text_lower):
+            hits.append(f"urgency_pattern")
+            score += 3
+            break  # count urgency once
+
+    # ALL CAPS phrases (screaming = social engineering pressure)
+    caps_words = re.findall(r'\b[A-Z]{4,}\b', text)
+    if len(caps_words) >= 3:
+        hits.append(f"excessive_caps({len(caps_words)} words)")
+        score += 2
+
+    # Exclamation marks overuse
+    if text.count('!') >= 3:
+        hits.append("excessive_exclamation_marks")
+        score += 1
+
+    return score, hits
+
+
+def extract_urls(text):
+    return re.findall(r'https?://\S+', text)
+
+
+def url_score(url):
+    score, reasons = 0, []
+    url_lower = url.lower()
+
+    if len(url) > 50:
+        score += 1
+        reasons.append("Long URL")
+    if url.count('.') > 3:
+        score += 1
+        reasons.append("Excessive subdomains")
+    if re.search(r'\d+\.\d+\.\d+\.\d+', url):
+        score += 3
+        reasons.append("IP address used instead of domain")
+    if url.startswith("http://"):
+        score += 2
+        reasons.append("Insecure (No HTTPS)")
+
+    # Check suspicious TLDs
+    for tld in suspicious_tlds:
+        if tld in url_lower:
+            score += 2
+            reasons.append(f"Suspicious TLD: {tld}")
+            break
+
+    # Check URL shorteners
+    for shortener in url_shorteners:
+        if shortener in url_lower:
+            score += 2
+            reasons.append(f"URL shortener used: {shortener}")
+            break
+
+    # URL encoding tricks (%xx characters used to hide real URL)
+    encoded_chars = re.findall(r'%[0-9A-Fa-f]{2}', url)
+    if len(encoded_chars) > 3:
+        score += 2
+        reasons.append(f"Excessive URL encoding ({len(encoded_chars)} encoded chars)")
+
+    # @ symbol in URL (redirects to attacker-controlled domain)
+    if '@' in url:
+        score += 3
+        reasons.append("@ symbol in URL (possible redirect trick)")
+
+    # Lookalike domain detection (e.g. paypa1.com, micr0soft.com)
+    for brand in impersonated_brands:
+        # Check if domain looks like a brand but with character substitution
+        domain_part = re.sub(r'https?://(www\.)?', '', url_lower).split('/')[0]
+        if brand not in domain_part:
+            # Simple l33t speak check
+            normalized = domain_part.replace('0', 'o').replace('1', 'l').replace('3', 'e').replace('4', 'a').replace('5', 's')
+            if brand in normalized and brand not in domain_part:
+                score += 4
+                reasons.append(f"Lookalike domain for '{brand}': {domain_part}")
+                break
+
+    return score, reasons
+
+
+def sender_score(sender):
+    score, reasons = 0, []
+    sender_lower = sender.lower()
+
+    if "@" not in sender:
+        score += 3
+        reasons.append("Invalid sender format (no @ symbol)")
+        return score, reasons
+
+    # Extract domain from sender
+    domain = sender_lower.split("@")[-1].strip(">").strip()
+
+    # Check if a brand name appears but sender uses freemail
+    is_freemail = any(d in domain for d in suspicious_sender_domains)
+
+    # Support/admin/security from freemail = huge red flag
+    impersonation_words = ["support", "admin", "security", "help", "service",
+                           "billing", "noreply", "no-reply", "alert", "notification",
+                           "info", "helpdesk", "team", "official"]
+    for word in impersonation_words:
+        if word in sender_lower and is_freemail:
+            score += 3
+            reasons.append(f"'{word}' from freemail domain '{domain}'")
+            break
+
+    # Brand in display name but freemail domain
+    for brand in impersonated_brands:
+        if brand in sender_lower and is_freemail:
+            score += 4
+            reasons.append(f"Brand '{brand}' impersonation from freemail '{domain}'")
+            break
+
+    # Suspicious TLD in sender domain
+    for tld in suspicious_tlds:
+        if domain.endswith(tld.lstrip('.')):
+            score += 2
+            reasons.append(f"Sender uses suspicious TLD: {tld}")
+            break
+
+    # Random-looking sender (lots of numbers/gibberish)
+    local_part = sender_lower.split("@")[0].strip("<").strip()
+    digit_ratio = sum(c.isdigit() for c in local_part) / max(len(local_part), 1)
+    if digit_ratio > 0.4 and len(local_part) > 5:
+        score += 2
+        reasons.append(f"Sender address looks auto-generated: {local_part}")
+
+    return score, reasons
+
+
+# =========================================================
+# AUTOMATED DETECTION SYSTEMS (No manual lists needed!)
+# =========================================================
+
+# --- 1. WHOIS DOMAIN AGE CHECK ---
+def whois_domain_age(domain):
+    """Check domain registration age. New domains are suspicious."""
+    score, reasons = 0, []
+    try:
+        w = whois.whois(domain)
+        creation_date = w.creation_date
+        if isinstance(creation_date, list):
+            creation_date = creation_date[0]
+        if creation_date:
+            age_days = (datetime.now() - creation_date).days
+            if age_days < 30:
+                score += 5
+                reasons.append(f"Domain '{domain}' is only {age_days} days old (HIGH RISK)")
+            elif age_days < 90:
+                score += 3
+                reasons.append(f"Domain '{domain}' is only {age_days} days old (recently registered)")
+            elif age_days < 180:
+                score += 1
+                reasons.append(f"Domain '{domain}' is {age_days} days old (relatively new)")
+
+            # Check if registrar info is hidden/private
+            registrar = w.registrar or ""
+            if any(word in registrar.lower() for word in ["privacy", "proxy", "whoisguard", "domains by proxy", "contact privacy"]):
+                score += 2
+                reasons.append(f"Domain uses privacy protection: {registrar}")
+    except Exception as e:
+        logger.debug(f"WHOIS lookup failed for {domain}: {e}")
+    return score, reasons
+
+
+# --- 2. LEVENSHTEIN DISTANCE (Auto lookalike detection) ---
+def levenshtein_domain_check(domain):
+    """Auto-detect typosquatting by measuring edit distance to known brands."""
+    score, reasons = 0, []
+    # Strip TLD for comparison
+    domain_base = domain.split('.')[0].lower()
+
+    for brand in impersonated_brands:
+        if brand == domain_base:
+            continue  # exact match = legit
+        distance = Levenshtein.distance(brand, domain_base)
+        # Flag if domain is 1-2 characters off from a brand
+        if distance == 1:
+            score += 5
+            reasons.append(f"Domain '{domain}' is 1 char away from '{brand}' (likely typosquatting)")
+        elif distance == 2 and len(brand) >= 5:
+            score += 3
+            reasons.append(f"Domain '{domain}' is 2 chars away from '{brand}' (possible typosquatting)")
+    return score, reasons
+
+
+# --- 3. SHANNON ENTROPY (Random domain detection) ---
+def calculate_entropy(text):
+    """Calculate Shannon entropy of a string. High entropy = random/generated."""
+    if not text:
+        return 0.0
+    freq = {}
+    for c in text:
+        freq[c] = freq.get(c, 0) + 1
+    length = len(text)
+    entropy = -sum((count / length) * math.log2(count / length) for count in freq.values())
+    return entropy
+
+
+def entropy_domain_check(domain):
+    """Flag domains with high entropy (randomly generated names)."""
+    score, reasons = 0, []
+    domain_base = domain.split('.')[0].lower()
+
+    if len(domain_base) < 4:
+        return score, reasons
+
+    entropy = calculate_entropy(domain_base)
+
+    # Legitimate domains typically have entropy < 3.5
+    # Random strings like "xk7qr2m" have entropy > 3.5
+    if entropy > 4.0 and len(domain_base) > 8:
+        score += 4
+        reasons.append(f"Domain '{domain}' has very high entropy ({entropy:.2f}) - likely auto-generated")
+    elif entropy > 3.5 and len(domain_base) > 6:
+        score += 2
+        reasons.append(f"Domain '{domain}' has high entropy ({entropy:.2f}) - possibly random")
+
+    # Check for excessive consonant clusters (gibberish detector)
+    consonant_clusters = re.findall(r'[^aeiou]{4,}', domain_base)
+    if consonant_clusters:
+        score += 2
+        reasons.append(f"Domain has unusual consonant clusters: {consonant_clusters}")
+
+    return score, reasons
+
+
+# --- 4. GOOGLE SAFE BROWSING API ---
+SAFE_BROWSING_API_KEY = os.environ.get("GOOGLE_SAFE_BROWSING_KEY", "AIzaSyDoIUHEA2bdaS9rNfs3Krn7526QvoPdt0A")
+
+
+def safe_browsing_check(urls):
+    """Check URLs against Google Safe Browsing API."""
+    score, reasons = 0, []
+    if not SAFE_BROWSING_API_KEY or not urls:
+        return score, reasons
+
+    try:
+        api_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={SAFE_BROWSING_API_KEY}"
+        payload = {
+            "client": {"clientId": "phishing-detector", "clientVersion": "1.0"},
+            "threatInfo": {
+                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE",
+                                "POTENTIALLY_HARMFUL_APPLICATION", "THREAT_TYPE_UNSPECIFIED"],
+                "platformTypes": ["ANY_PLATFORM"],
+                "threatEntryTypes": ["URL"],
+                "threatEntries": [{"url": u} for u in urls[:10]]  # API limit
+            }
+        }
+        response = requests.post(api_url, json=payload, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            matches = data.get("matches", [])
+            for match in matches:
+                threat_type = match.get("threatType", "UNKNOWN")
+                threat_url = match.get("threat", {}).get("url", "")
+                score += 10  # Google flagged it = very bad
+                reasons.append(f"Google Safe Browsing: {threat_url} flagged as {threat_type}")
+    except Exception as e:
+        logger.debug(f"Safe Browsing API error: {e}")
+
+    return score, reasons
+
+
+# --- 5. EMAIL HEADER FORENSICS (SPF/DKIM/DMARC) ---
+def header_forensics(msg):
+    """Analyze email authentication headers for spoofing indicators."""
+    score, reasons = 0, []
+    if not msg:
+        return score, reasons
+
+    # Check Authentication-Results header
+    auth_results = msg.get("Authentication-Results", "")
+    if auth_results:
+        auth_lower = auth_results.lower()
+
+        # SPF check
+        if "spf=fail" in auth_lower or "spf=softfail" in auth_lower:
+            score += 4
+            reasons.append("SPF authentication FAILED (sender domain didn't authorize this server)")
+        elif "spf=none" in auth_lower:
+            score += 2
+            reasons.append("No SPF record found for sender domain")
+        elif "spf=pass" in auth_lower:
+            reasons.append("SPF: PASS ✓")
+
+        # DKIM check
+        if "dkim=fail" in auth_lower:
+            score += 4
+            reasons.append("DKIM signature FAILED (email may have been tampered with)")
+        elif "dkim=none" in auth_lower:
+            score += 1
+            reasons.append("No DKIM signature found")
+        elif "dkim=pass" in auth_lower:
+            reasons.append("DKIM: PASS ✓")
+
+        # DMARC check
+        if "dmarc=fail" in auth_lower:
+            score += 5
+            reasons.append("DMARC authentication FAILED (HIGH RISK - likely spoofed)")
+        elif "dmarc=none" in auth_lower:
+            score += 1
+            reasons.append("No DMARC policy found for sender domain")
+        elif "dmarc=pass" in auth_lower:
+            reasons.append("DMARC: PASS ✓")
+    else:
+        score += 1
+        reasons.append("No Authentication-Results header (cannot verify sender)")
+
+    # Check Received-SPF header (alternative location)
+    received_spf = msg.get("Received-SPF", "")
+    if received_spf:
+        if "fail" in received_spf.lower():
+            score += 3
+            reasons.append(f"Received-SPF: FAIL")
+
+    # Check X-Spam headers
+    spam_status = msg.get("X-Spam-Status", "")
+    if spam_status and "yes" in spam_status.lower():
+        score += 3
+        reasons.append(f"Marked as spam by mail server")
+
+    spam_score_header = msg.get("X-Spam-Score", "")
+    if spam_score_header:
+        try:
+            spam_val = float(spam_score_header)
+            if spam_val > 5.0:
+                score += 3
+                reasons.append(f"High spam score from mail server: {spam_val}")
+        except ValueError:
+            pass
+
+    # Check for suspicious Received chain (excessive hops)
+    received_headers = msg.get_all("Received") or []
+    if len(received_headers) > 10:
+        score += 2
+        reasons.append(f"Excessive mail relay hops: {len(received_headers)} (possible obfuscation)")
+
+    return score, reasons
+
+
+def extract_domain_from_url(url):
+    """Extract clean domain from a URL."""
+    try:
+        parsed = urlparse(url)
+        return parsed.netloc or parsed.path.split('/')[0]
+    except Exception:
+        return ""
+
+
+def extract_domain_from_sender(sender):
+    """Extract domain from email sender string."""
+    if "@" not in sender:
+        return ""
+    return sender.lower().split("@")[-1].strip(">").strip()
+
+
+# -------------------------
+# ANALYZER & ENDPOINTS
+# -------------------------
+def analyze_email(subject, sender, body, msg=None):
+    # --- Whitelist check: skip all engines for trusted domains ---
+    sender_domain_wl = extract_domain_from_sender(sender)
+    if sender_domain_wl and any(sender_domain_wl.endswith(d) for d in WHITELISTED_DOMAINS):
+        return {
+            "score": 0,
+            "verdict": "SAFE",
+            "reasons": [f"Whitelisted domain: {sender_domain_wl}"],
+            "engines": {},
+            "sender_domain": sender_domain_wl,
+        }
+
+    total_score = 0
+    reasons = []
+    engines = {}  # per-engine breakdown
+
+    # --- 1. Keyword Analysis ---
+    ks, kw = keyword_score(f"{subject} {body}")
+    total_score += ks
+    if kw:
+        reasons.append(f"Suspicious Keywords: {kw}")
+    engines["keywords"] = {"score": ks, "hits": len(kw) if kw else 0}
+
+    # --- 2. URL Inspection ---
+    urls = extract_urls(body)
+    url_total = 0
+    for u in urls:
+        us, ur = url_score(u)
+        url_total += us
+        total_score += us
+        if ur:
+            reasons.append(f"URL issue ({u}): {ur}")
+    engines["urls"] = {"score": url_total, "count": len(urls)}
+
+    # --- 3. Sender Verification ---
+    ss, sr = sender_score(sender)
+    total_score += ss
+    if sr:
+        reasons.append(f"Sender issue: {sr}")
+    engines["sender"] = {"score": ss}
+
+    # --- 4. Reply-To Mismatch ---
+    reply_to_score = 0
+    if msg and msg.get("Reply-To") and msg.get("Reply-To") != msg.get("From"):
+        reply_to_score = 3
+        total_score += reply_to_score
+        reasons.append(f"Reply-To mismatch: From='{msg.get('From')}' vs Reply-To='{msg.get('Reply-To')}'")
+    engines["reply_to"] = {"score": reply_to_score}
+
+    # --- Automated detection systems ---
+
+    # 5. WHOIS domain age
+    checked_domains = set()
+    sender_domain = extract_domain_from_sender(sender)
+    if sender_domain and sender_domain not in suspicious_sender_domains:
+        checked_domains.add(sender_domain)
+    for u in urls:
+        d = extract_domain_from_url(u)
+        if d:
+            checked_domains.add(d)
+
+    whois_total = 0
+    for domain in checked_domains:
+        ws, wr = whois_domain_age(domain)
+        whois_total += ws
+        total_score += ws
+        if wr:
+            reasons.extend(wr)
+    engines["whois"] = {"score": whois_total, "domains_checked": list(checked_domains)}
+
+    # 6. Levenshtein typosquatting
+    lev_total = 0
+    for domain in checked_domains:
+        ls, lr = levenshtein_domain_check(domain)
+        lev_total += ls
+        total_score += ls
+        if lr:
+            reasons.extend(lr)
+    engines["levenshtein"] = {"score": lev_total}
+
+    # 7. Shannon entropy
+    ent_total = 0
+    for domain in checked_domains:
+        es, er = entropy_domain_check(domain)
+        ent_total += es
+        total_score += es
+        if er:
+            reasons.extend(er)
+    engines["entropy"] = {"score": ent_total}
+
+    # 8. Google Safe Browsing
+    sb_total = 0
+    if urls:
+        sbs, sbr = safe_browsing_check(urls)
+        sb_total = sbs
+        total_score += sbs
+        if sbr:
+            reasons.extend(sbr)
+    engines["safe_browsing"] = {"score": sb_total}
+
+    # 9. Email header forensics (SPF/DKIM/DMARC)
+    hfs, hfr = header_forensics(msg)
+    total_score += hfs
+    if hfr:
+        reasons.extend(hfr)
+    engines["header_forensics"] = {"score": hfs, "details": hfr}
+
+    # Verdict
+    if total_score >= 8:
+        verdict = "PHISHING"
+    elif total_score >= 4:
+        verdict = "SUSPICIOUS"
+    else:
+        verdict = "SAFE"
+
+    return {
+        "score": total_score,
+        "verdict": verdict,
+        "reasons": reasons,
+        "engines": engines,
+        "sender_domain": sender_domain or "",
+    }
+
+
+@app.get("/")
+def home():
+    return FileResponse(str(BASE_DIR / "static" / "index.html"))
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "online", "message": "Phishing Detector is active."}
+
+
+@app.post("/analyze")
+def analyze(input: EmailInput):
+    subject, sender, body, msg = parse_email(input.raw_email)
+    return analyze_email(subject, sender, body, msg)
+
+
+@app.get("/scan-gmail")
+def scan_gmail(max_results: int = 5):
+    emails = get_gmail_emails(max_results=min(max_results, 50))
+    if not emails:
+        return {"message": "No emails found or Auth failed. Check terminal."}
+
+    results = []
+    for e in emails:
+        # Pass the mock message object for full header forensics
+        mock_msg = e.get('_msg')
+        res = analyze_email(e['subject'], e['sender'], e['body'], msg=mock_msg)
+        results.append({
+            "subject": e['subject'],
+            "sender": e['sender'],
+            "analysis": res,
+        })
+    return results
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+===
+import os
+import re
+import math
+import pickle
+import logging
+import socket
+import base64
+import unicodedata
+from pathlib import Path
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+from email import message_from_string
+from email.utils import parseaddr
+
+import uvicorn
+import requests
+import whois
+import dns.resolver
+import Levenshtein
+from bs4 import BeautifulSoup
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+# Google API Imports
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+
+WHITELISTED_DOMAINS = [
+    "klh.edu.in",
+]
+
+BASE_DIR = Path(__file__).resolve().parent
+
+app = FastAPI(title="Phishing Detector API")
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+
+class EmailInput(BaseModel):
+    raw_email: str
+
+
+# ─────────────────────────────────────────────
+# GMAIL AUTH
+# ─────────────────────────────────────────────
+def get_credentials():
+    creds = None
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+    return creds
+
+
+SECURITY_HEADERS = [
+    'Subject', 'From', 'Reply-To', 'Return-Path',
+    'Authentication-Results', 'Received-SPF',
+    'X-Spam-Status', 'X-Spam-Score',
+    'DKIM-Signature', 'ARC-Authentication-Results',
+]
+
+
+def get_gmail_emails(max_results=5):
+    try:
+        creds = get_credentials()
+        service = build('gmail', 'v1', credentials=creds)
+
+        results = service.users().messages().list(userId='me', maxResults=max_results).execute()
+        messages = results.get('messages', [])
+
+        emails = []
+        for msg in messages:
+            txt = service.users().messages().get(userId='me', id=msg['id']).execute()
+            payload = txt.get('payload', {})
+            headers = payload.get('headers', [])
+
+            header_dict = {}
+            received_list = []
+            for h in headers:
+                if h['name'] == 'Received':
+                    received_list.append(h['value'])
+                else:
+                    header_dict[h['name']] = h['value']
+
+            subject = header_dict.get('Subject', 'No Subject')
+            sender = header_dict.get('From', 'Unknown Sender')
+
+            # Body extraction — both plain and HTML
+            body_plain = ""
+            body_html = ""
+
+            def _extract_parts(part):
+                nonlocal body_plain, body_html
+                mime = part.get('mimeType', '')
+                data = part.get('body', {}).get('data', '')
+                if mime == 'text/plain' and data:
+                    body_plain += base64.urlsafe_b64decode(data + '==').decode(errors='ignore')
+                elif mime == 'text/html' and data:
+                    body_html += base64.urlsafe_b64decode(data + '==').decode(errors='ignore')
+                for sub in part.get('parts', []):
+                    _extract_parts(sub)
+
+            if 'parts' in payload:
+                for part in payload['parts']:
+                    _extract_parts(part)
+            else:
+                _extract_parts(payload)
+
+            # Build mock email.message for header forensics
+            mock_msg = message_from_string("")
+            for hname in SECURITY_HEADERS:
+                if hname in header_dict:
+                    mock_msg[hname] = header_dict[hname]
+            for recv in received_list:
+                mock_msg['Received'] = recv
+
+            # Extract attachment info
+            attachments = []
+            def _extract_attachments(part):
+                filename = part.get('filename', '')
+                if filename:
+                    attachments.append({
+                        'filename': filename,
+                        'mimeType': part.get('mimeType', ''),
+                        'size': int(part.get('body', {}).get('size', 0)),
+                    })
+                for sub in part.get('parts', []):
+                    _extract_attachments(sub)
+
+            if 'parts' in payload:
+                for part in payload['parts']:
+                    _extract_attachments(part)
+
+            emails.append({
+                "subject": subject,
+                "sender": sender,
+                "body": body_plain or body_html,
+                "body_html": body_html,
+                "attachments": attachments,
+                "_msg": mock_msg,
+            })
+        return emails
+    except Exception as e:
+        print(f"Gmail Fetch Error: {e}")
+        return []
+
+
+# ─────────────────────────────────────────────
+# DATA: Keywords, brands, patterns
+# ─────────────────────────────────────────────
+suspicious_words = [
+    "urgent", "verify", "account suspended", "click here", "login now",
+    "password reset", "immediate action", "bank alert", "account locked",
+    "account disabled", "account compromised", "unauthorized access",
+    "suspicious activity", "security alert", "unusual sign-in",
+    "confirm your identity", "verify your account", "update your information",
+    "action required", "account verification", "confirm your email",
+    "re-verify", "validate your account", "suspended account",
+    "wire transfer", "money transfer", "western union", "bitcoin",
+    "cryptocurrency", "investment opportunity", "guaranteed returns",
+    "risk-free", "double your money", "financial freedom",
+    "invoice attached", "outstanding payment", "overdue payment",
+    "payment declined", "billing problem", "refund pending",
+    "tax refund", "unclaimed funds", "inheritance",
+    "congratulations", "you have won", "you've won", "lottery winner",
+    "prize winner", "claim your prize", "free gift", "gift card",
+    "selected winner", "million dollars", "cash prize",
+    "act now", "limited time", "expires today", "don't miss",
+    "final warning", "last chance", "failure to respond", "within 24 hours",
+    "within 48 hours", "your account will be", "do not ignore",
+    "respond immediately", "time sensitive", "dear customer",
+    "dear user", "dear account holder", "valued customer",
+    "sign in", "log in", "click below", "click the link",
+    "update payment", "confirm payment", "enter your details",
+    "social security", "ssn", "date of birth", "credit card number",
+    "routing number", "pin number",
+    "package delivery", "shipment notification", "delivery failed",
+    "track your package", "customs fee", "shipping label",
+]
+
+suspicious_sender_domains = [
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+    "aol.com", "mail.com", "yandex.com", "protonmail.com",
+    "zoho.com", "gmx.com", "inbox.com", "icloud.com",
+]
+
+impersonated_brands = [
+    "paypal", "apple", "amazon", "netflix", "microsoft", "google",
+    "facebook", "instagram", "whatsapp", "bank of america", "chase",
+    "wells fargo", "citi", "hsbc", "barclays", "irs", "hmrc",
+    "fedex", "ups", "usps", "dhl", "dropbox", "linkedin",
+    "twitter", "spotify", "adobe", "ebay", "walmart", "costco",
+]
+
+suspicious_tlds = [
+    ".xyz", ".top", ".click", ".loan", ".work", ".gq", ".cf",
+    ".tk", ".ml", ".ga", ".buzz", ".icu", ".club", ".info",
+    ".site", ".online", ".live", ".support", ".stream", ".download",
+    ".racing", ".win", ".bid", ".science", ".party", ".review",
+    ".trade", ".date", ".faith", ".accountant", ".cricket",
+]
+
+url_shorteners = [
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd",
+    "buff.ly", "short.to", "tiny.cc", "rb.gy", "cutt.ly",
+    "shorturl.at", "shrtco.de",
+]
+
+urgency_patterns = [
+    r'(?:act|respond|reply|click|call)\s+(?:now|immediately|asap|today)',
+    r'(?:within|in)\s+\d+\s+(?:hour|minute|day)',
+    r'(?:expire|expir(?:es|ing|ed))\s+(?:soon|today|tomorrow)',
+    r'account\s+(?:will be|has been)\s+(?:closed|suspended|terminated|locked|disabled)',
+    r'(?:final|last)\s+(?:notice|warning|reminder|chance)',
+]
+
+# Dangerous attachment extensions
+dangerous_extensions = [
+    '.exe', '.vbs', '.js', '.bat', '.cmd', '.com', '.pif', '.scr',
+    '.docm', '.xlsm', '.pptm', '.dotm', '.xltm',
+    '.jar', '.hta', '.wsf', '.wsh', '.ps1', '.psm1',
+    '.msi', '.msp', '.reg', '.inf', '.lnk',
+    '.iso', '.img',
+]
+
+# Archive extensions that could hide dangerous files
+archive_extensions = ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2']
+
+# Homoglyph mapping: Unicode lookalikes for Latin characters
+HOMOGLYPH_MAP = {
+    'а': 'a', 'е': 'e', 'і': 'i', 'о': 'o', 'р': 'p',
+    'с': 'c', 'у': 'y', 'х': 'x', 'ѕ': 's', 'ј': 'j',
+    'ɡ': 'g', 'ɑ': 'a', 'ɩ': 'l', 'ν': 'v', 'τ': 't',
+    'ԁ': 'd', 'ᴍ': 'm', 'ᴏ': 'o', 'ℯ': 'e', 'ℓ': 'l',
+    'ⅰ': 'i', 'ⅱ': 'ii', 'ℎ': 'h', 'ĸ': 'k', 'ŋ': 'n',
+    'ɴ': 'n', 'ʀ': 'r', 'ꜱ': 's', 'ᴛ': 't', 'ᴜ': 'u',
+    'ᴡ': 'w', 'ᴢ': 'z', 'ⓐ': 'a', 'ⓑ': 'b', 'ⓒ': 'c',
+    '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
+    '５': '5', '６': '6', '７': '7', '８': '8', '９': '9',
+}
+
+
+# ─────────────────────────────────────────────
+# ENGINE 1: KEYWORD ANALYSIS
+# ─────────────────────────────────────────────
+def keyword_score(text):
+    text_lower = text.lower()
+    score = 0
+    hits = []
+
+    for word in suspicious_words:
+        if word in text_lower:
+            hits.append(word)
+            score += 2
+
+    for brand in impersonated_brands:
+        if brand in text_lower:
+            hits.append(f"brand:{brand}")
+            score += 1
+
+    for pattern in urgency_patterns:
+        if re.search(pattern, text_lower):
+            hits.append("urgency_pattern")
+            score += 3
+            break
+
+    caps_words = re.findall(r'\b[A-Z]{4,}\b', text)
+    if len(caps_words) >= 3:
+        hits.append(f"excessive_caps({len(caps_words)} words)")
+        score += 2
+
+    if text.count('!') >= 3:
+        hits.append("excessive_exclamation_marks")
+        score += 1
+
+    return score, hits
+
+
+# ─────────────────────────────────────────────
+# ENGINE 2: URL ANALYSIS
+# ─────────────────────────────────────────────
+def extract_urls(text):
+    return re.findall(r'https?://\S+', text)
+
+
+def url_score(url):
+    score, reasons = 0, []
+    url_lower = url.lower()
+
+    if len(url) > 50:
+        score += 1
+        reasons.append("Long URL")
+    if url.count('.') > 3:
+        score += 1
+        reasons.append("Excessive subdomains")
+    if re.search(r'\d+\.\d+\.\d+\.\d+', url):
+        score += 3
+        reasons.append("IP address used instead of domain")
+    if url.startswith("http://"):
+        score += 2
+        reasons.append("Insecure (No HTTPS)")
+
+    for tld in suspicious_tlds:
+        if tld in url_lower:
+            score += 2
+            reasons.append(f"Suspicious TLD: {tld}")
+            break
+
+    for shortener in url_shorteners:
+        if shortener in url_lower:
+            score += 2
+            reasons.append(f"URL shortener used: {shortener}")
+            break
+
+    encoded_chars = re.findall(r'%[0-9A-Fa-f]{2}', url)
+    if len(encoded_chars) > 3:
+        score += 2
+        reasons.append(f"Excessive URL encoding ({len(encoded_chars)} encoded chars)")
+
+    if '@' in url:
+        score += 3
+        reasons.append("@ symbol in URL (possible redirect trick)")
+
+    for brand in impersonated_brands:
+        domain_part = re.sub(r'https?://(www\.)?', '', url_lower).split('/')[0]
+        if brand not in domain_part:
+            normalized = domain_part.replace('0', 'o').replace('1', 'l').replace('3', 'e').replace('4', 'a').replace('5', 's')
+            if brand in normalized and brand not in domain_part:
+                score += 4
+                reasons.append(f"Lookalike domain for '{brand}': {domain_part}")
+                break
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 3: SENDER VERIFICATION
+# ─────────────────────────────────────────────
+def sender_score(sender):
+    score, reasons = 0, []
+    sender_lower = sender.lower()
+
+    if "@" not in sender:
+        score += 3
+        reasons.append("Invalid sender format (no @ symbol)")
+        return score, reasons
+
+    domain = sender_lower.split("@")[-1].strip(">").strip()
+
+    is_freemail = any(d in domain for d in suspicious_sender_domains)
+
+    impersonation_words = ["support", "admin", "security", "help", "service",
+                           "billing", "noreply", "no-reply", "alert", "notification",
+                           "info", "helpdesk", "team", "official"]
+    for word in impersonation_words:
+        if word in sender_lower and is_freemail:
+            score += 3
+            reasons.append(f"'{word}' from freemail domain '{domain}'")
+            break
+
+    for brand in impersonated_brands:
+        if brand in sender_lower and is_freemail:
+            score += 4
+            reasons.append(f"Brand '{brand}' impersonation from freemail '{domain}'")
+            break
+
+    for tld in suspicious_tlds:
+        if domain.endswith(tld.lstrip('.')):
+            score += 2
+            reasons.append(f"Sender uses suspicious TLD: {tld}")
+            break
+
+    local_part = sender_lower.split("@")[0].strip("<").strip()
+    digit_ratio = sum(c.isdigit() for c in local_part) / max(len(local_part), 1)
+    if digit_ratio > 0.4 and len(local_part) > 5:
+        score += 2
+        reasons.append(f"Sender address looks auto-generated: {local_part}")
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 4: REPLY-TO MISMATCH
+# ─────────────────────────────────────────────
+def reply_to_check(msg):
+    score, reasons = 0, []
+    if not msg:
+        return score, reasons
+    reply_to = msg.get("Reply-To", "")
+    from_addr = msg.get("From", "")
+    if reply_to and from_addr:
+        _, reply_email = parseaddr(reply_to)
+        _, from_email = parseaddr(from_addr)
+        if reply_email and from_email and reply_email.lower() != from_email.lower():
+            score = 3
+            reasons.append(f"Reply-To mismatch: From='{from_email}' vs Reply-To='{reply_email}'")
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 5: WHOIS DOMAIN AGE
+# ─────────────────────────────────────────────
+def whois_domain_age(domain):
+    score, reasons = 0, []
+    try:
+        w = whois.whois(domain)
+        creation_date = w.creation_date
+        if isinstance(creation_date, list):
+            creation_date = creation_date[0]
+        if creation_date:
+            age_days = (datetime.now() - creation_date).days
+            if age_days < 30:
+                score += 5
+                reasons.append(f"Domain '{domain}' is only {age_days} days old (HIGH RISK)")
+            elif age_days < 90:
+                score += 3
+                reasons.append(f"Domain '{domain}' is only {age_days} days old (recently registered)")
+            elif age_days < 180:
+                score += 1
+                reasons.append(f"Domain '{domain}' is {age_days} days old (relatively new)")
+
+            registrar = w.registrar or ""
+            if any(word in registrar.lower() for word in ["privacy", "proxy", "whoisguard", "domains by proxy", "contact privacy"]):
+                score += 2
+                reasons.append(f"Domain uses privacy protection: {registrar}")
+    except Exception as e:
+        logger.debug(f"WHOIS lookup failed for {domain}: {e}")
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 6: LEVENSHTEIN TYPOSQUATTING
+# ─────────────────────────────────────────────
+def levenshtein_domain_check(domain):
+    score, reasons = 0, []
+    domain_base = domain.split('.')[0].lower()
+
+    for brand in impersonated_brands:
+        if brand == domain_base:
+            continue
+        distance = Levenshtein.distance(brand, domain_base)
+        if distance == 1:
+            score += 5
+            reasons.append(f"Domain '{domain}' is 1 char away from '{brand}' (likely typosquatting)")
+        elif distance == 2 and len(brand) >= 5:
+            score += 3
+            reasons.append(f"Domain '{domain}' is 2 chars away from '{brand}' (possible typosquatting)")
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 7: SHANNON ENTROPY
+# ─────────────────────────────────────────────
+def calculate_entropy(text):
+    if not text:
+        return 0.0
+    freq = {}
+    for c in text:
+        freq[c] = freq.get(c, 0) + 1
+    length = len(text)
+    entropy = -sum((count / length) * math.log2(count / length) for count in freq.values())
+    return entropy
+
+
+def entropy_domain_check(domain):
+    score, reasons = 0, []
+    domain_base = domain.split('.')[0].lower()
+
+    if len(domain_base) < 4:
+        return score, reasons
+
+    entropy = calculate_entropy(domain_base)
+
+    if entropy > 4.0 and len(domain_base) > 8:
+        score += 4
+        reasons.append(f"Domain '{domain}' has very high entropy ({entropy:.2f}) — likely auto-generated")
+    elif entropy > 3.5 and len(domain_base) > 6:
+        score += 2
+        reasons.append(f"Domain '{domain}' has high entropy ({entropy:.2f}) — possibly random")
+
+    consonant_clusters = re.findall(r'[^aeiou]{4,}', domain_base)
+    if consonant_clusters:
+        score += 2
+        reasons.append(f"Domain has unusual consonant clusters: {consonant_clusters}")
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 8: GOOGLE SAFE BROWSING
+# ─────────────────────────────────────────────
+SAFE_BROWSING_API_KEY = os.environ.get("GOOGLE_SAFE_BROWSING_KEY", "AIzaSyDoIUHEA2bdaS9rNfs3Krn7526QvoPdt0A")
+
+
+def safe_browsing_check(urls):
+    score, reasons = 0, []
+    if not SAFE_BROWSING_API_KEY or not urls:
+        return score, reasons
+
+    try:
+        api_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={SAFE_BROWSING_API_KEY}"
+        payload = {
+            "client": {"clientId": "phishing-detector", "clientVersion": "1.0"},
+            "threatInfo": {
+                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE",
+                                "POTENTIALLY_HARMFUL_APPLICATION", "THREAT_TYPE_UNSPECIFIED"],
+                "platformTypes": ["ANY_PLATFORM"],
+                "threatEntryTypes": ["URL"],
+                "threatEntries": [{"url": u} for u in urls[:10]]
+            }
+        }
+        response = requests.post(api_url, json=payload, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            matches = data.get("matches", [])
+            for match in matches:
+                threat_type = match.get("threatType", "UNKNOWN")
+                threat_url = match.get("threat", {}).get("url", "")
+                score += 10
+                reasons.append(f"Google Safe Browsing: {threat_url} flagged as {threat_type}")
+    except Exception as e:
+        logger.debug(f"Safe Browsing API error: {e}")
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 9: HEADER FORENSICS (SPF/DKIM/DMARC)
+# ─────────────────────────────────────────────
+def header_forensics(msg):
+    score, reasons = 0, []
+    if not msg:
+        return score, reasons
+
+    auth_results = msg.get("Authentication-Results", "")
+    if auth_results:
+        auth_lower = auth_results.lower()
+
+        if "spf=fail" in auth_lower or "spf=softfail" in auth_lower:
+            score += 4
+            reasons.append("SPF authentication FAILED — sender domain didn't authorize this server")
+        elif "spf=none" in auth_lower:
+            score += 2
+            reasons.append("No SPF record found for sender domain")
+        elif "spf=pass" in auth_lower:
+            reasons.append("SPF: PASS ✓")
+
+        if "dkim=fail" in auth_lower:
+            score += 4
+            reasons.append("DKIM signature FAILED — email may have been tampered with")
+        elif "dkim=none" in auth_lower:
+            score += 1
+            reasons.append("No DKIM signature found")
+        elif "dkim=pass" in auth_lower:
+            reasons.append("DKIM: PASS ✓")
+
+        if "dmarc=fail" in auth_lower:
+            score += 5
+            reasons.append("DMARC authentication FAILED (HIGH RISK — likely spoofed)")
+        elif "dmarc=none" in auth_lower:
+            score += 1
+            reasons.append("No DMARC policy found for sender domain")
+        elif "dmarc=pass" in auth_lower:
+            reasons.append("DMARC: PASS ✓")
+    else:
+        score += 1
+        reasons.append("No Authentication-Results header (cannot verify sender)")
+
+    received_spf = msg.get("Received-SPF", "")
+    if received_spf:
+        if "fail" in received_spf.lower():
+            score += 3
+            reasons.append("Received-SPF: FAIL")
+
+    spam_status = msg.get("X-Spam-Status", "")
+    if spam_status and "yes" in spam_status.lower():
+        score += 3
+        reasons.append("Marked as spam by mail server")
+
+    spam_score_header = msg.get("X-Spam-Score", "")
+    if spam_score_header:
+        try:
+            spam_val = float(spam_score_header)
+            if spam_val > 5.0:
+                score += 3
+                reasons.append(f"High spam score from mail server: {spam_val}")
+        except ValueError:
+            pass
+
+    received_headers = msg.get_all("Received") or []
+    if len(received_headers) > 10:
+        score += 2
+        reasons.append(f"Excessive mail relay hops: {len(received_headers)} (possible obfuscation)")
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 10: HOMOGLYPH DETECTION
+# ─────────────────────────────────────────────
+def homoglyph_check(domain):
+    """Detect Unicode character substitution in domain names."""
+    score, reasons = 0, []
+
+    has_homoglyph = False
+    normalized = []
+    suspicious_chars = []
+
+    for char in domain:
+        if char in HOMOGLYPH_MAP:
+            has_homoglyph = True
+            normalized.append(HOMOGLYPH_MAP[char])
+            suspicious_chars.append(f"'{char}' (U+{ord(char):04X}) → '{HOMOGLYPH_MAP[char]}'")
+        else:
+            normalized.append(char)
+
+    if has_homoglyph:
+        score += 5
+        normalized_domain = ''.join(normalized)
+        reasons.append(f"Homoglyph attack detected in '{domain}' → normalizes to '{normalized_domain}'")
+        for sc in suspicious_chars[:5]:
+            reasons.append(f"  Unicode substitution: {sc}")
+
+    # Also check for mixed scripts (Latin + Cyrillic etc.)
+    scripts = set()
+    for char in domain:
+        if char.isalpha():
+            try:
+                script = unicodedata.name(char, '').split()[0]
+                scripts.add(script)
+            except Exception:
+                pass
+    if len(scripts) > 1:
+        score += 3
+        reasons.append(f"Mixed Unicode scripts detected in domain: {scripts}")
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 11: PUNYCODE / IDN DETECTION
+# ─────────────────────────────────────────────
+def punycode_check(domain):
+    """Detect internationalized domain name (IDN) abuse."""
+    score, reasons = 0, []
+    domain_lower = domain.lower()
+
+    if domain_lower.startswith("xn--") or ".xn--" in domain_lower:
+        score += 4
+        try:
+            decoded = domain.encode('ascii').decode('idna')
+            reasons.append(f"Punycode/IDN domain detected: '{domain}' decodes to '{decoded}'")
+        except Exception:
+            reasons.append(f"Punycode/IDN domain detected: '{domain}' (could not decode)")
+        reasons.append("IDN domains are often used to visually impersonate legitimate sites")
+
+    # Check if any non-ASCII characters are present
+    non_ascii = [c for c in domain if ord(c) > 127]
+    if non_ascii:
+        score += 3
+        chars_display = ', '.join(f"U+{ord(c):04X}" for c in non_ascii[:5])
+        reasons.append(f"Non-ASCII characters in domain: {chars_display}")
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 12: SUBDOMAIN ABUSE
+# ─────────────────────────────────────────────
+def subdomain_abuse_check(domain):
+    """Detect brand names being used as subdomains of malicious domains."""
+    score, reasons = 0, []
+    parts = domain.lower().split('.')
+
+    if len(parts) < 3:
+        return score, reasons
+
+    # The registrable domain is usually the last 2 parts (e.g., evil.com)
+    registrable = '.'.join(parts[-2:])
+    subdomains = '.'.join(parts[:-2])
+
+    for brand in impersonated_brands:
+        brand_clean = brand.replace(' ', '')
+        if brand_clean in subdomains and brand_clean not in registrable:
+            score += 4
+            reasons.append(f"Subdomain abuse: '{brand}' appears in subdomain of '{registrable}'")
+            reasons.append(f"Full domain: {domain} — the actual domain is '{registrable}', not '{brand}'")
+            break
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 13: DOMAIN MISMATCH (Display vs Href)
+# ─────────────────────────────────────────────
+def domain_mismatch_check(html_body):
+    """Detect when link display text shows one domain but href points elsewhere."""
+    score, reasons = 0, []
+    if not html_body:
+        return score, reasons
+
+    try:
+        soup = BeautifulSoup(html_body, 'html.parser')
+        links = soup.find_all('a', href=True)
+
+        for link in links:
+            href = link['href']
+            display_text = link.get_text(strip=True)
+
+            # Only check if display text looks like a URL or domain
+            display_urls = re.findall(r'(?:https?://)?(?:www\.)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', display_text)
+            if not display_urls:
+                continue
+
+            href_parsed = urlparse(href)
+            href_domain = href_parsed.netloc.lower().replace('www.', '')
+
+            for display_domain in display_urls:
+                display_domain = display_domain.lower().replace('www.', '')
+                if display_domain != href_domain and href_domain:
+                    score += 5
+                    reasons.append(
+                        f"Domain mismatch: link shows '{display_domain}' but actually goes to '{href_domain}'"
+                    )
+    except Exception as e:
+        logger.debug(f"Domain mismatch check error: {e}")
+
+    return min(score, 15), reasons[:5]
+
+
+# ─────────────────────────────────────────────
+# ENGINE 14: RETURN-PATH MISMATCH
+# ─────────────────────────────────────────────
+def return_path_check(msg):
+    """Detect when Return-Path (bounce address) differs from From header."""
+    score, reasons = 0, []
+    if not msg:
+        return score, reasons
+
+    return_path = msg.get("Return-Path", "")
+    from_header = msg.get("From", "")
+
+    if return_path and from_header:
+        _, rp_email = parseaddr(return_path)
+        _, from_email = parseaddr(from_header)
+
+        if rp_email and from_email:
+            rp_domain = rp_email.lower().split('@')[-1] if '@' in rp_email else ''
+            from_domain = from_email.lower().split('@')[-1] if '@' in from_email else ''
+
+            if rp_domain and from_domain and rp_domain != from_domain:
+                score += 3
+                reasons.append(
+                    f"Return-Path mismatch: From domain is '{from_domain}' but bounce address is '{rp_domain}'"
+                )
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 15: ATTACHMENT ANALYSIS
+# ─────────────────────────────────────────────
+def attachment_score(msg=None, attachment_list=None):
+    """Analyze email attachments for dangerous files."""
+    score, reasons = 0, []
+
+    attachments = []
+
+    # From parsed email message
+    if msg and msg.is_multipart():
+        for part in msg.walk():
+            filename = part.get_filename()
+            if filename:
+                content_type = part.get_content_type()
+                attachments.append({
+                    'filename': filename,
+                    'mimeType': content_type,
+                    'size': len(part.get_payload(decode=True) or b''),
+                })
+
+    # From Gmail API attachment list
+    if attachment_list:
+        attachments.extend(attachment_list)
+
+    if not attachments:
+        return score, reasons
+
+    for att in attachments:
+        fname = att.get('filename', '').lower()
+        mime = att.get('mimeType', '').lower()
+        ext = os.path.splitext(fname)[1] if '.' in fname else ''
+
+        # Check dangerous extensions
+        if ext in dangerous_extensions:
+            score += 6
+            reasons.append(f"Dangerous attachment: '{fname}' ({ext} files can execute code)")
+
+        # Double extension trick (e.g., document.pdf.exe)
+        if fname.count('.') >= 2:
+            parts = fname.rsplit('.', 2)
+            if len(parts) >= 3:
+                actual_ext = '.' + parts[-1]
+                if actual_ext in dangerous_extensions:
+                    score += 5
+                    reasons.append(f"Double extension trick: '{fname}' — real extension is {actual_ext}")
+
+        # Archive that could contain dangerous files
+        if ext in archive_extensions:
+            score += 2
+            reasons.append(f"Archive attachment: '{fname}' — could contain hidden executables")
+
+        # MIME type vs extension mismatch
+        mime_ext_map = {
+            'application/pdf': ['.pdf'],
+            'image/jpeg': ['.jpg', '.jpeg'],
+            'image/png': ['.png'],
+            'text/plain': ['.txt'],
+            'application/msword': ['.doc'],
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+        }
+
+        for expected_mime, expected_exts in mime_ext_map.items():
+            if mime == expected_mime and ext and ext not in expected_exts:
+                score += 3
+                reasons.append(f"MIME type mismatch: '{fname}' claims to be {mime} but has extension {ext}")
+                break
+
+        # Password-protected archive indicator (heuristic: mentioned in body)
+        # This is checked separately in content analysis
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 16: HTML OBFUSCATION DETECTION
+# ─────────────────────────────────────────────
+def html_obfuscation_check(html_body):
+    """Detect HTML tricks used to hide text from scanners."""
+    score, reasons = 0, []
+    if not html_body:
+        return score, reasons
+
+    try:
+        soup = BeautifulSoup(html_body, 'html.parser')
+
+        # Zero font-size trick
+        zero_font_elements = soup.find_all(style=re.compile(r'font-size\s*:\s*0', re.I))
+        if zero_font_elements:
+            score += 4
+            reasons.append(f"Zero font-size trick: {len(zero_font_elements)} hidden text elements found")
+
+        # display:none hiding
+        hidden_elements = soup.find_all(style=re.compile(r'display\s*:\s*none', re.I))
+        if len(hidden_elements) > 3:
+            score += 3
+            reasons.append(f"Excessive hidden elements: {len(hidden_elements)} elements with display:none")
+
+        # visibility:hidden
+        invisible = soup.find_all(style=re.compile(r'visibility\s*:\s*hidden', re.I))
+        if invisible:
+            score += 2
+            reasons.append(f"Invisible text: {len(invisible)} elements with visibility:hidden")
+
+        # Tiny text (font-size: 1px, 2px etc.)
+        tiny_text = soup.find_all(style=re.compile(r'font-size\s*:\s*[12]px', re.I))
+        if tiny_text:
+            score += 3
+            reasons.append(f"Tiny text detected: {len(tiny_text)} elements with very small font size")
+
+        # Color matching background (white on white, etc.)
+        same_color = soup.find_all(style=re.compile(r'color\s*:\s*(white|#fff|#ffffff|rgba\(0,\s*0,\s*0,\s*0\))', re.I))
+        if same_color:
+            score += 2
+            reasons.append(f"Possible text color obfuscation: {len(same_color)} elements")
+
+        # Excessive base64 encoded images (could be tracking pixels or obfuscation)
+        b64_imgs = soup.find_all('img', src=re.compile(r'data:image', re.I))
+        if len(b64_imgs) > 5:
+            score += 2
+            reasons.append(f"Excessive embedded images: {len(b64_imgs)} base64-encoded images")
+
+    except Exception as e:
+        logger.debug(f"HTML obfuscation check error: {e}")
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 17: FORM ACTION URL ANALYSIS
+# ─────────────────────────────────────────────
+def form_action_check(html_body, sender_domain=""):
+    """Detect HTML forms that submit data to external/suspicious domains."""
+    score, reasons = 0, []
+    if not html_body:
+        return score, reasons
+
+    try:
+        soup = BeautifulSoup(html_body, 'html.parser')
+        forms = soup.find_all('form', action=True)
+
+        for form in forms:
+            action = form['action']
+            if not action or action.startswith('#') or action.startswith('javascript:'):
+                continue
+
+            parsed = urlparse(action)
+            action_domain = parsed.netloc.lower()
+
+            if not action_domain:
+                continue
+
+            # Form submits to external domain
+            if sender_domain and action_domain != sender_domain:
+                score += 5
+                reasons.append(f"Form submits to external domain: '{action_domain}' (sender is '{sender_domain}')")
+
+            # Form submits over HTTP
+            if parsed.scheme == 'http':
+                score += 3
+                reasons.append(f"Form submits over insecure HTTP: {action}")
+
+            # Form submits to IP address
+            if re.match(r'\d+\.\d+\.\d+\.\d+', action_domain):
+                score += 4
+                reasons.append(f"Form submits to IP address: {action_domain}")
+
+            # Check for suspicious input types (password fields)
+            password_inputs = form.find_all('input', type='password')
+            if password_inputs:
+                score += 3
+                reasons.append(f"Form with password field submitting to '{action_domain}'")
+
+    except Exception as e:
+        logger.debug(f"Form action check error: {e}")
+
+    return min(score, 15), reasons[:5]
+
+
+# ─────────────────────────────────────────────
+# ENGINE 18: IMAGE-ONLY EMAIL DETECTION
+# ─────────────────────────────────────────────
+def image_only_check(html_body):
+    """Detect emails that are primarily images (evade text scanning)."""
+    score, reasons = 0, []
+    if not html_body:
+        return score, reasons
+
+    try:
+        soup = BeautifulSoup(html_body, 'html.parser')
+
+        # Get all visible text
+        text = soup.get_text(strip=True)
+        text_len = len(text)
+
+        # Count images
+        images = soup.find_all('img')
+        image_count = len(images)
+
+        # If very little text but images present
+        if image_count > 0 and text_len < 50:
+            score += 3
+            reasons.append(f"Image-only email: {image_count} image(s) but only {text_len} chars of text")
+            reasons.append("Image-only emails are used to evade text-based scanning")
+        elif image_count > 0 and text_len < 150 and image_count >= 2:
+            score += 2
+            reasons.append(f"Mostly image-based email: {image_count} images with minimal text ({text_len} chars)")
+
+    except Exception as e:
+        logger.debug(f"Image-only check error: {e}")
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 19: PHISHTANK / OPENPHISH LOOKUP
+# ─────────────────────────────────────────────
+def phishtank_check(urls):
+    """Check URLs against known phishing databases."""
+    score, reasons = 0, []
+    if not urls:
+        return score, reasons
+
+    for url in urls[:5]:
+        # OpenPhish (free, no API key needed)
+        try:
+            resp = requests.get(
+                "https://openphish.com/feed.txt",
+                timeout=5,
+                headers={"User-Agent": "PhishDetector/1.0"}
+            )
+            if resp.status_code == 200:
+                phish_urls = resp.text.strip().split('\n')
+                url_normalized = url.lower().rstrip('/')
+                for phish_url in phish_urls:
+                    if url_normalized in phish_url.lower().rstrip('/'):
+                        score += 10
+                        reasons.append(f"OpenPhish: URL '{url}' found in phishing database")
+                        break
+        except Exception as e:
+            logger.debug(f"OpenPhish check error: {e}")
+            break  # Don't spam the API
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# ENGINE 20: IP REPUTATION (Spamhaus DNS)
+# ─────────────────────────────────────────────
+def ip_reputation_check(msg):
+    """Check sender IP against Spamhaus ZEN blocklist via DNS."""
+    score, reasons = 0, []
+    if not msg:
+        return score, reasons
+
+    # Extract IPs from Received headers
+    received_headers = msg.get_all("Received") or []
+    ips = set()
+    for header in received_headers:
+        found = re.findall(r'\[(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\]', header)
+        ips.update(found)
+
+    # Filter out private IPs
+    public_ips = set()
+    for ip in ips:
+        octets = ip.split('.')
+        if octets[0] in ('10',) or \
+           (octets[0] == '172' and 16 <= int(octets[1]) <= 31) or \
+           (octets[0] == '192' and octets[1] == '168') or \
+           octets[0] == '127':
+            continue
+        public_ips.add(ip)
+
+    blocklists = {
+        'zen.spamhaus.org': 'Spamhaus ZEN',
+        'bl.spamcop.net': 'SpamCop',
+        'b.barracudacentral.org': 'Barracuda',
+    }
+
+    for ip in list(public_ips)[:3]:  # Check max 3 IPs
+        reversed_ip = '.'.join(reversed(ip.split('.')))
+
+        for bl_domain, bl_name in blocklists.items():
+            query = f"{reversed_ip}.{bl_domain}"
+            try:
+                dns.resolver.resolve(query, 'A')
+                # If we get a response, the IP is listed
+                score += 5
+                reasons.append(f"{bl_name}: Sender IP {ip} is BLACKLISTED")
+            except dns.resolver.NXDOMAIN:
+                pass  # Not listed (good)
+            except Exception:
+                pass  # DNS error, skip
+
+    return score, reasons
+
+
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+def extract_domain_from_url(url):
+    try:
+        parsed = urlparse(url)
+        return parsed.netloc or parsed.path.split('/')[0]
+    except Exception:
+        return ""
+
+
+def extract_domain_from_sender(sender):
+    if "@" not in sender:
+        return ""
+    return sender.lower().split("@")[-1].strip(">").strip()
+
+
+def parse_email(raw):
+    msg = message_from_string(raw)
+    subject = msg.get('Subject', '')
+    sender = msg.get('From', '')
+    body = ""
+    html_body = ""
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            payload = part.get_payload(decode=True)
+            if payload:
+                decoded = payload.decode(errors='ignore')
+                if ct == "text/plain":
+                    body += decoded
+                elif ct == "text/html":
+                    html_body += decoded
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            decoded = payload.decode(errors='ignore')
+            ct = msg.get_content_type()
+            if ct == "text/html":
+                html_body = decoded
+            else:
+                body = decoded
+
+    return subject, sender, body, html_body, msg
+
+
+# ─────────────────────────────────────────────
+# MAIN ANALYZER — ALL 20 ENGINES
+# ─────────────────────────────────────────────
+def analyze_email(subject, sender, body, msg=None, html_body="", attachment_list=None):
+    # --- Whitelist check ---
+    sender_domain_wl = extract_domain_from_sender(sender)
+    if sender_domain_wl and any(sender_domain_wl.endswith(d) for d in WHITELISTED_DOMAINS):
+        return {
+            "score": 0,
+            "verdict": "SAFE",
+            "reasons": [f"Whitelisted domain: {sender_domain_wl}"],
+            "engines": {},
+            "sender_domain": sender_domain_wl,
+        }
+
+    total_score = 0
+    reasons = []
+    engines = {}
+
+    combined_text = f"{subject} {body}"
+
+    # ── ENGINE 1: Keywords ──
+    ks, kw = keyword_score(combined_text)
+    total_score += ks
+    if kw:
+        reasons.append(f"Suspicious Keywords: {kw}")
+    engines["keywords"] = {"score": ks, "hits": len(kw) if kw else 0}
+
+    # ── ENGINE 2: URL Inspection ──
+    urls = extract_urls(body)
+    # Also extract from HTML if available
+    if html_body:
+        try:
+            soup = BeautifulSoup(html_body, 'html.parser')
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if href.startswith('http') and href not in urls:
+                    urls.append(href)
+        except Exception:
+            pass
+
+    url_total = 0
+    for u in urls:
+        us, ur = url_score(u)
+        url_total += us
+        total_score += us
+        if ur:
+            reasons.append(f"URL issue ({u}): {ur}")
+    engines["urls"] = {"score": url_total, "count": len(urls)}
+
+    # ── ENGINE 3: Sender Verification ──
+    ss, sr = sender_score(sender)
+    total_score += ss
+    if sr:
+        reasons.append(f"Sender issue: {sr}")
+    engines["sender"] = {"score": ss}
+
+    # ── ENGINE 4: Reply-To Mismatch ──
+    rt_s, rt_r = reply_to_check(msg)
+    total_score += rt_s
+    reasons.extend(rt_r)
+    engines["reply_to"] = {"score": rt_s}
+
+    # ── ENGINE 5: WHOIS Domain Age ──
+    checked_domains = set()
+    sender_domain = extract_domain_from_sender(sender)
+    if sender_domain and sender_domain not in suspicious_sender_domains:
+        checked_domains.add(sender_domain)
+    for u in urls:
+        d = extract_domain_from_url(u)
+        if d:
+            checked_domains.add(d)
+
+    whois_total = 0
+    for domain in checked_domains:
+        ws, wr = whois_domain_age(domain)
+        whois_total += ws
+        total_score += ws
+        if wr:
+            reasons.extend(wr)
+    engines["whois"] = {"score": whois_total, "domains_checked": list(checked_domains)}
+
+    # ── ENGINE 6: Levenshtein Typosquatting ──
+    lev_total = 0
+    for domain in checked_domains:
+        ls, lr = levenshtein_domain_check(domain)
+        lev_total += ls
+        total_score += ls
+        if lr:
+            reasons.extend(lr)
+    engines["levenshtein"] = {"score": lev_total}
+
+    # ── ENGINE 7: Shannon Entropy ──
+    ent_total = 0
+    for domain in checked_domains:
+        es, er = entropy_domain_check(domain)
+        ent_total += es
+        total_score += es
+        if er:
+            reasons.extend(er)
+    engines["entropy"] = {"score": ent_total}
+
+    # ── ENGINE 8: Google Safe Browsing ──
+    sb_total = 0
+    if urls:
+        sbs, sbr = safe_browsing_check(urls)
+        sb_total = sbs
+        total_score += sbs
+        if sbr:
+            reasons.extend(sbr)
+    engines["safe_browsing"] = {"score": sb_total}
+
+    # ── ENGINE 9: Header Forensics ──
+    hfs, hfr = header_forensics(msg)
+    total_score += hfs
+    if hfr:
+        reasons.extend(hfr)
+    engines["header_forensics"] = {"score": hfs, "details": hfr}
+
+    # ── ENGINE 10: Homoglyph Detection ──
+    hg_total = 0
+    for domain in checked_domains:
+        hgs, hgr = homoglyph_check(domain)
+        hg_total += hgs
+        total_score += hgs
+        reasons.extend(hgr)
+    engines["homoglyph"] = {"score": hg_total}
+
+    # ── ENGINE 11: Punycode / IDN ──
+    pc_total = 0
+    for domain in checked_domains:
+        pcs, pcr = punycode_check(domain)
+        pc_total += pcs
+        total_score += pcs
+        reasons.extend(pcr)
+    engines["punycode"] = {"score": pc_total}
+
+    # ── ENGINE 12: Subdomain Abuse ──
+    sd_total = 0
+    for domain in checked_domains:
+        sds, sdr = subdomain_abuse_check(domain)
+        sd_total += sds
+        total_score += sds
+        reasons.extend(sdr)
+    engines["subdomain_abuse"] = {"score": sd_total}
+
+    # ── ENGINE 13: Domain Mismatch (Display vs Href) ──
+    dm_s, dm_r = domain_mismatch_check(html_body)
+    total_score += dm_s
+    reasons.extend(dm_r)
+    engines["domain_mismatch"] = {"score": dm_s}
+
+    # ── ENGINE 14: Return-Path Mismatch ──
+    rp_s, rp_r = return_path_check(msg)
+    total_score += rp_s
+    reasons.extend(rp_r)
+    engines["return_path"] = {"score": rp_s}
+
+    # ── ENGINE 15: Attachment Analysis ──
+    at_s, at_r = attachment_score(msg=msg, attachment_list=attachment_list)
+    total_score += at_s
+    reasons.extend(at_r)
+    engines["attachments"] = {"score": at_s}
+
+    # ── ENGINE 16: HTML Obfuscation ──
+    ho_s, ho_r = html_obfuscation_check(html_body)
+    total_score += ho_s
+    reasons.extend(ho_r)
+    engines["html_obfuscation"] = {"score": ho_s}
+
+    # ── ENGINE 17: Form Action ──
+    fa_s, fa_r = form_action_check(html_body, sender_domain)
+    total_score += fa_s
+    reasons.extend(fa_r)
+    engines["form_action"] = {"score": fa_s}
+
+    # ── ENGINE 18: Image-Only Email ──
+    io_s, io_r = image_only_check(html_body)
+    total_score += io_s
+    reasons.extend(io_r)
+    engines["image_only"] = {"score": io_s}
+
+    # ── ENGINE 19: PhishTank / OpenPhish ──
+    pt_s, pt_r = phishtank_check(urls)
+    total_score += pt_s
+    reasons.extend(pt_r)
+    engines["phishtank"] = {"score": pt_s}
+
+    # ── ENGINE 20: IP Reputation ──
+    ir_s, ir_r = ip_reputation_check(msg)
+    total_score += ir_s
+    reasons.extend(ir_r)
+    engines["ip_reputation"] = {"score": ir_s}
+
+    # ── Verdict ──
+    if total_score >= 8:
+        verdict = "PHISHING"
+    elif total_score >= 4:
+        verdict = "SUSPICIOUS"
+    else:
+        verdict = "SAFE"
+
+    return {
+        "score": total_score,
+        "verdict": verdict,
+        "reasons": reasons,
+        "engines": engines,
+        "sender_domain": sender_domain or "",
+    }
+
+
+# ─────────────────────────────────────────────
+# API ENDPOINTS
+# ─────────────────────────────────────────────
+@app.get("/")
+def home():
+    return FileResponse(str(BASE_DIR / "static" / "index.html"))
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "online", "message": "Phishing Detector is active.", "engines": 20}
+
+
+@app.post("/analyze")
+def analyze(input: EmailInput):
+    subject, sender, body, html_body, msg = parse_email(input.raw_email)
+    return analyze_email(subject, sender, body, msg, html_body=html_body)
+
+
+@app.get("/scan-gmail")
+def scan_gmail(max_results: int = 5):
+    emails = get_gmail_emails(max_results=min(max_results, 50))
+    if not emails:
+        return {"message": "No emails found or Auth failed. Check terminal."}
+
+    results = []
+    for e in emails:
+        mock_msg = e.get('_msg')
+        res = analyze_email(
+            e['subject'], e['sender'], e['body'],
+            msg=mock_msg,
+            html_body=e.get('body_html', ''),
+            attachment_list=e.get('attachments', []),
+        )
+        results.append({
+            "subject": e['subject'],
+            "sender": e['sender'],
+            "analysis": res,
+        })
+    return results
+
+
+@app.get("/api/engines")
+def list_engines():
+    """Return information about all detection engines."""
+    return [
+        {"id": "keywords", "name": "Keyword Analysis", "icon": "search", "category": "content",
+         "description": "Scans subject and body for phishing phrases, urgency patterns, and social engineering keywords."},
+        {"id": "urls", "name": "URL Inspection", "icon": "link", "category": "content",
+         "description": "Analyzes extracted URLs for IP addresses, suspicious TLDs, shorteners, encoding tricks, and lookalike domains."},
+        {"id": "sender", "name": "Sender Verification", "icon": "user", "category": "header",
+         "description": "Checks sender address for freemail impersonation, brand spoofing, suspicious TLDs, and auto-generated patterns."},
+        {"id": "reply_to", "name": "Reply-To Mismatch", "icon": "corner-up-left", "category": "header",
+         "description": "Flags when the Reply-To address differs from the From address, a common phishing technique."},
+        {"id": "whois", "name": "WHOIS Domain Age", "icon": "calendar", "category": "domain",
+         "description": "Checks domain registration age via WHOIS. Newly registered domains are high risk."},
+        {"id": "levenshtein", "name": "Levenshtein Typosquatting", "icon": "type", "category": "domain",
+         "description": "Measures edit distance between domain names and known brands to catch typosquatting."},
+        {"id": "entropy", "name": "Shannon Entropy", "icon": "activity", "category": "domain",
+         "description": "Calculates randomness of domain names. High entropy indicates auto-generated domains."},
+        {"id": "safe_browsing", "name": "Google Safe Browsing", "icon": "shield", "category": "reputation",
+         "description": "Checks URLs against Google's real-time threat database for known malware and phishing sites."},
+        {"id": "header_forensics", "name": "SPF / DKIM / DMARC", "icon": "lock", "category": "header",
+         "description": "Validates email authentication headers. Failed checks indicate sender spoofing."},
+        {"id": "homoglyph", "name": "Homoglyph Detection", "icon": "eye", "category": "domain",
+         "description": "Detects Unicode character substitution (e.g., Cyrillic 'е' vs Latin 'e') used to spoof domains."},
+        {"id": "punycode", "name": "Punycode / IDN", "icon": "globe", "category": "domain",
+         "description": "Detects internationalized domain names (xn-- prefixed) used to create visually identical fake domains."},
+        {"id": "subdomain_abuse", "name": "Subdomain Abuse", "icon": "layers", "category": "domain",
+         "description": "Catches brand names used as subdomains of malicious domains (e.g., paypal.com.evil.net)."},
+        {"id": "domain_mismatch", "name": "Display vs Href Mismatch", "icon": "alert-triangle", "category": "content",
+         "description": "Detects when visible link text shows one domain but the actual URL points elsewhere."},
+        {"id": "return_path", "name": "Return-Path Mismatch", "icon": "corner-down-left", "category": "header",
+         "description": "Flags when the bounce address (Return-Path) differs from the sender's domain."},
+        {"id": "attachments", "name": "Attachment Scanner", "icon": "paperclip", "category": "content",
+         "description": "Checks for dangerous file extensions, double-extension tricks, archives, and MIME type mismatches."},
+        {"id": "html_obfuscation", "name": "HTML Obfuscation", "icon": "code", "category": "content",
+         "description": "Detects hidden text, zero-font-size tricks, invisible elements, and other HTML obfuscation techniques."},
+        {"id": "form_action", "name": "Form Action Analysis", "icon": "log-in", "category": "content",
+         "description": "Identifies HTML forms that submit data to external or suspicious domains."},
+        {"id": "image_only", "name": "Image-Only Detection", "icon": "image", "category": "content",
+         "description": "Flags emails that are primarily images with minimal text, used to bypass text-based scanning."},
+        {"id": "phishtank", "name": "PhishTank / OpenPhish", "icon": "database", "category": "reputation",
+         "description": "Checks URLs against community-maintained phishing databases for known threats."},
+        {"id": "ip_reputation", "name": "IP Reputation", "icon": "server", "category": "reputation",
+         "description": "Checks sender IP addresses against Spamhaus, SpamCop, and Barracuda DNS blocklists."},
+    ]
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+```
+
+#### Engine Inventory
+
+| # | Engine | Category | What it detects |
+|---|--------|----------|-----------------|
+| 1 | Keyword Analysis | Content | Phishing phrases, urgency patterns, ALL CAPS, exclamation marks |
+| 2 | URL Inspection | Content | IP-based URLs, suspicious TLDs, shorteners, encoding tricks, lookalike domains |
+| 3 | Sender Verification | Header | Freemail impersonation, brand spoofing, suspicious TLDs, auto-generated addresses |
+| 4 | Reply-To Mismatch | Header | Reply-To differs from From address |
+| 5 | WHOIS Domain Age | Domain | Newly registered domains, privacy-protected registrations |
+| 6 | Levenshtein Typosquatting | Domain | Edit distance to known brands (paypa1.com → PayPal) |
+| 7 | Shannon Entropy | Domain | Random/auto-generated domain names |
+| 8 | Google Safe Browsing | Reputation | Known malware/phishing sites via Google API |
+| 9 | SPF/DKIM/DMARC | Header | Email authentication failures, spam status, relay hops |
+| 10 | **Homoglyph Detection** | Domain | Unicode character substitution (Cyrillic е vs Latin e) |
+| 11 | **Punycode/IDN** | Domain | Internationalized domain name spoofing |
+| 12 | **Subdomain Abuse** | Domain | Brand names as subdomains of malicious domains |
+| 13 | **Display vs Href Mismatch** | Content | Link text shows one domain, href points elsewhere |
+| 14 | **Return-Path Mismatch** | Header | Bounce address differs from sender |
+| 15 | **Attachment Scanner** | Content | Dangerous extensions, double-extension tricks, MIME mismatches |
+| 16 | **HTML Obfuscation** | Content | Zero-font, hidden text, invisible elements, tiny text |
+| 17 | **Form Action Analysis** | Content | Forms submitting to external/suspicious domains |
+| 18 | **Image-Only Detection** | Content | Bodies that are entirely images (scanner evasion) |
+| 19 | **PhishTank/OpenPhish** | Reputation | Community-maintained phishing URL databases |
+| 20 | **IP Reputation** | Reputation | Spamhaus, SpamCop, Barracuda DNS blocklists |
+
+#### New API endpoints
+- `GET /api/engines` — Returns all 20 engine definitions with metadata
+
+#### Key improvements
+- HTML body extraction (was plain-text only)
+- Gmail scanner now fetches both `text/plain` and `text/html` parts
+- Gmail scanner extracts attachment metadata
+- Per-engine score breakdown in analysis results
+
+---
+
+## Frontend Changes
+
+### Design Direction
+- **Before**: Generic glassmorphism SaaS template with floating orbs, blue/purple gradient text
+- **After**: Professional cybersecurity command-center with sidebar navigation, deep navy palette, cyan/teal accents
+
+### [index.html](file:///Users/david/fish/static/index.html) — SPA with 4 Views
+
+```diff:index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Phishing Detector — AI-Powered Email Security Dashboard</title>
+  <meta name="description" content="Scan your Gmail inbox for phishing threats using rule-based detection, WHOIS analysis, Google Safe Browsing, and more.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- Animated background -->
+  <div class="bg-gradient">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="orb orb-3"></div>
+  </div>
+
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header__badge">
+        <span class="header__status-dot"></span>
+        System Active
+      </div>
+      <h1 class="header__title">Phishing Detector</h1>
+      <p class="header__subtitle">
+        AI-powered email security. Scan your Gmail inbox to detect phishing attempts, spoofing, and social engineering attacks in real time.
+      </p>
+    </header>
+
+    <!-- Stats -->
+    <section class="stats">
+      <div class="stat-card">
+        <div class="stat-card__icon">📧</div>
+        <div class="stat-card__value" id="stat-scanned">0</div>
+        <div class="stat-card__label">Emails Scanned</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__icon">🚨</div>
+        <div class="stat-card__value" id="stat-threats">0</div>
+        <div class="stat-card__label">Threats Found</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__icon">🛡️</div>
+        <div class="stat-card__value" id="stat-safe">0</div>
+        <div class="stat-card__label">Safe Emails</div>
+      </div>
+    </section>
+
+    <!-- Gmail Inbox Scanner -->
+    <section class="inbox-section">
+      <div class="card">
+        <div class="card__header">
+          <span class="card__header-icon">📬</span>
+          <span class="card__header-title">Gmail Inbox</span>
+          <div class="inbox-controls">
+            <label class="inbox-label" for="email-count">Emails:</label>
+            <select id="email-count" class="inbox-select">
+              <option value="5">5</option>
+              <option value="10" selected>10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+            </select>
+            <button id="scan-btn" class="btn btn--primary">
+              <span class="btn__text">🔍 Scan Inbox</span>
+            </button>
+          </div>
+        </div>
+        <div class="card__body" id="inbox-body">
+          <div class="inbox-empty" id="inbox-empty">
+            <div class="inbox-empty__icon">📬</div>
+            <div class="inbox-empty__text">
+              Click <strong>Scan Inbox</strong> to fetch and analyze your recent Gmail emails for phishing threats
+            </div>
+            <div class="inbox-empty__hint">Requires Gmail OAuth — a browser window will open on first use</div>
+          </div>
+          <div id="inbox-list" class="inbox-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- API Reference Section -->
+    <section class="api-section" id="api-reference">
+      <div class="card">
+        <div class="card__header">
+          <span class="card__header-icon">⚡</span>
+          <span class="card__header-title">API Reference</span>
+          <span class="api-section__badge">FastAPI v0.135</span>
+        </div>
+        <div class="card__body">
+          <p class="api-section__desc">All available endpoints for the Phishing Detector service. Base URL: <code class="api-code">http://127.0.0.1:8000</code></p>
+
+          <!-- Endpoint: GET /api/health -->
+          <div class="api-endpoint" id="endpoint-health">
+            <div class="api-endpoint__header" onclick="toggleEndpoint('endpoint-health')">
+              <span class="api-method api-method--get">GET</span>
+              <span class="api-path">/api/health</span>
+              <span class="api-endpoint__desc">Health check & system status</span>
+              <span class="api-endpoint__chevron">▾</span>
+            </div>
+            <div class="api-endpoint__body">
+              <div class="api-detail">
+                <div class="api-detail__label">Description</div>
+                <p class="api-detail__text">Returns the current status of the Phishing Detector service.</p>
+              </div>
+              <div class="api-detail">
+                <div class="api-detail__label">Response</div>
+                <pre class="api-pre"><code>{
+  "status": "online",
+  "message": "Phishing Detector is active."
+}</code></pre>
+              </div>
+              <div class="api-tryit">
+                <button class="btn btn--small btn--primary" onclick="tryEndpoint('GET', '/api/health', 'endpoint-health')">
+                  <span class="btn__text">▶ Try It</span>
+                </button>
+                <pre class="api-response" id="response-endpoint-health"></pre>
+              </div>
+            </div>
+          </div>
+
+          <!-- Endpoint: POST /analyze -->
+          <div class="api-endpoint" id="endpoint-analyze">
+            <div class="api-endpoint__header" onclick="toggleEndpoint('endpoint-analyze')">
+              <span class="api-method api-method--post">POST</span>
+              <span class="api-path">/analyze</span>
+              <span class="api-endpoint__desc">Analyze a raw email for phishing</span>
+              <span class="api-endpoint__chevron">▾</span>
+            </div>
+            <div class="api-endpoint__body">
+              <div class="api-detail">
+                <div class="api-detail__label">Description</div>
+                <p class="api-detail__text">Analyzes a raw email (including headers) using 8 detection engines: keyword matching, URL analysis, sender verification, WHOIS domain age, Levenshtein typosquatting, Shannon entropy, Google Safe Browsing, and SPF/DKIM/DMARC forensics.</p>
+              </div>
+              <div class="api-detail">
+                <div class="api-detail__label">Request Body</div>
+                <pre class="api-pre"><code>{
+  "raw_email": "From: sender@example.com\nSubject: ...\n\nBody text..."
+}</code></pre>
+              </div>
+              <div class="api-detail">
+                <div class="api-detail__label">Response Schema</div>
+                <pre class="api-pre"><code>{
+  "score": 12,           <span class="api-comment">// Risk score (0 = safe, higher = riskier)</span>
+  "verdict": "PHISHING", <span class="api-comment">// "SAFE" | "SUSPICIOUS" | "PHISHING"</span>
+  "reasons": [...]       <span class="api-comment">// Array of detection reasons</span>
+}</code></pre>
+              </div>
+              <div class="api-detail">
+                <div class="api-detail__label">Score Thresholds</div>
+                <div class="api-thresholds">
+                  <div class="api-threshold api-threshold--safe">
+                    <span class="api-threshold__range">0 – 3</span>
+                    <span class="api-threshold__label">SAFE</span>
+                  </div>
+                  <div class="api-threshold api-threshold--suspicious">
+                    <span class="api-threshold__range">4 – 7</span>
+                    <span class="api-threshold__label">SUSPICIOUS</span>
+                  </div>
+                  <div class="api-threshold api-threshold--phishing">
+                    <span class="api-threshold__range">8+</span>
+                    <span class="api-threshold__label">PHISHING</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Endpoint: GET /scan-gmail -->
+          <div class="api-endpoint" id="endpoint-gmail">
+            <div class="api-endpoint__header" onclick="toggleEndpoint('endpoint-gmail')">
+              <span class="api-method api-method--get">GET</span>
+              <span class="api-path">/scan-gmail</span>
+              <span class="api-endpoint__desc">Scan your Gmail inbox</span>
+              <span class="api-endpoint__chevron">▾</span>
+            </div>
+            <div class="api-endpoint__body">
+              <div class="api-detail">
+                <div class="api-detail__label">Description</div>
+                <p class="api-detail__text">Fetches recent emails from your Gmail inbox via the Gmail API and analyzes each for phishing indicators. Requires OAuth authentication.</p>
+              </div>
+              <div class="api-detail">
+                <div class="api-detail__label">Query Parameters</div>
+                <div class="api-param">
+                  <code class="api-code">max_results</code>
+                  <span class="api-param__type">integer</span>
+                  <span class="api-param__default">default: 5, max: 50</span>
+                </div>
+              </div>
+              <div class="api-detail">
+                <div class="api-detail__label">Response</div>
+                <pre class="api-pre"><code>[
+  {
+    "subject": "Email subject line",
+    "analysis": {
+      "score": 2,
+      "verdict": "SAFE",
+      "reasons": [...]
+    }
+  }
+]</code></pre>
+              </div>
+            </div>
+          </div>
+
+          <!-- Endpoint: GET /docs -->
+          <div class="api-endpoint" id="endpoint-docs">
+            <div class="api-endpoint__header" onclick="toggleEndpoint('endpoint-docs')">
+              <span class="api-method api-method--get">GET</span>
+              <span class="api-path">/docs</span>
+              <span class="api-endpoint__desc">Interactive Swagger UI</span>
+              <span class="api-endpoint__chevron">▾</span>
+            </div>
+            <div class="api-endpoint__body">
+              <div class="api-detail">
+                <div class="api-detail__label">Description</div>
+                <p class="api-detail__text">Auto-generated interactive API documentation powered by Swagger UI / OpenAPI.</p>
+              </div>
+              <div class="api-tryit">
+                <a href="/docs" target="_blank" class="btn btn--small btn--ghost">↗ Open Swagger UI</a>
+              </div>
+            </div>
+          </div>
+
+          <!-- Detection Engines -->
+          <div class="api-engines">
+            <div class="api-detail__label" style="margin-bottom: 12px;">Detection Engines</div>
+            <div class="api-engines__grid">
+              <div class="api-engine">
+                <span class="api-engine__icon">🔑</span>
+                <span class="api-engine__name">Keyword Analysis</span>
+              </div>
+              <div class="api-engine">
+                <span class="api-engine__icon">🔗</span>
+                <span class="api-engine__name">URL Inspection</span>
+              </div>
+              <div class="api-engine">
+                <span class="api-engine__icon">👤</span>
+                <span class="api-engine__name">Sender Verification</span>
+              </div>
+              <div class="api-engine">
+                <span class="api-engine__icon">🌐</span>
+                <span class="api-engine__name">WHOIS Domain Age</span>
+              </div>
+              <div class="api-engine">
+                <span class="api-engine__icon">📐</span>
+                <span class="api-engine__name">Levenshtein Typosquatting</span>
+              </div>
+              <div class="api-engine">
+                <span class="api-engine__icon">📊</span>
+                <span class="api-engine__name">Shannon Entropy</span>
+              </div>
+              <div class="api-engine">
+                <span class="api-engine__icon">🛡️</span>
+                <span class="api-engine__name">Google Safe Browsing</span>
+              </div>
+              <div class="api-engine">
+                <span class="api-engine__icon">✉️</span>
+                <span class="api-engine__name">SPF / DKIM / DMARC</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      Phishing Detector &mdash; Powered by FastAPI
+    </footer>
+
+  </div>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>
+===
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PhishGuard — Email Threat Intelligence Platform</title>
+  <meta name="description" content="Professional phishing email detection with 20 rule-based engines. No ML needed — deterministic, explainable, auditable.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐟</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar__brand">
+      <div class="sidebar__logo">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+      </div>
+      <div class="sidebar__brand-text">
+        <span class="sidebar__name">PhishGuard</span>
+        <span class="sidebar__version">v2.0 · 20 engines</span>
+      </div>
+    </div>
+
+    <nav class="sidebar__nav">
+      <a class="nav-item active" data-view="dashboard" id="nav-dashboard">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+        </svg>
+        <span>Dashboard</span>
+      </a>
+      <a class="nav-item" data-view="analyze" id="nav-analyze">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <span>Analyze Email</span>
+      </a>
+      <a class="nav-item" data-view="gmail" id="nav-gmail">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>
+        </svg>
+        <span>Gmail Scanner</span>
+      </a>
+      <a class="nav-item" data-view="engines" id="nav-engines">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        <span>Engines</span>
+        <span class="nav-badge">20</span>
+      </a>
+    </nav>
+
+    <div class="sidebar__footer">
+      <div class="sidebar__status" id="system-status">
+        <span class="status-dot status-dot--offline"></span>
+        <span class="status-text">Connecting...</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main" id="main-content">
+
+    <!-- ════════════ DASHBOARD VIEW ════════════ -->
+    <section class="view active" id="view-dashboard">
+      <div class="view__header">
+        <div>
+          <h1 class="view__title">Threat Dashboard</h1>
+          <p class="view__subtitle">Real-time phishing detection overview</p>
+        </div>
+        <div class="view__actions">
+          <button class="btn btn--outline btn--sm" onclick="resetStats()" id="reset-stats-btn">Reset Stats</button>
+        </div>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-card" id="stat-card-scanned">
+          <div class="stat-card__top">
+            <span class="stat-card__label">Scanned</span>
+            <div class="stat-card__icon stat-card__icon--blue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            </div>
+          </div>
+          <div class="stat-card__value" id="stat-scanned">0</div>
+          <div class="stat-card__bar"><div class="stat-card__bar-fill stat-card__bar-fill--blue" style="width:0%"></div></div>
+        </div>
+
+        <div class="stat-card" id="stat-card-threats">
+          <div class="stat-card__top">
+            <span class="stat-card__label">Threats</span>
+            <div class="stat-card__icon stat-card__icon--red">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </div>
+          </div>
+          <div class="stat-card__value" id="stat-threats">0</div>
+          <div class="stat-card__bar"><div class="stat-card__bar-fill stat-card__bar-fill--red" style="width:0%"></div></div>
+        </div>
+
+        <div class="stat-card" id="stat-card-suspicious">
+          <div class="stat-card__top">
+            <span class="stat-card__label">Suspicious</span>
+            <div class="stat-card__icon stat-card__icon--amber">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            </div>
+          </div>
+          <div class="stat-card__value" id="stat-suspicious">0</div>
+          <div class="stat-card__bar"><div class="stat-card__bar-fill stat-card__bar-fill--amber" style="width:0%"></div></div>
+        </div>
+
+        <div class="stat-card" id="stat-card-safe">
+          <div class="stat-card__top">
+            <span class="stat-card__label">Safe</span>
+            <div class="stat-card__icon stat-card__icon--green">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            </div>
+          </div>
+          <div class="stat-card__value" id="stat-safe">0</div>
+          <div class="stat-card__bar"><div class="stat-card__bar-fill stat-card__bar-fill--green" style="width:0%"></div></div>
+        </div>
+      </div>
+
+      <!-- Threat Distribution -->
+      <div class="panel">
+        <div class="panel__header">
+          <h2 class="panel__title">Threat Distribution</h2>
+        </div>
+        <div class="panel__body">
+          <div class="threat-chart" id="threat-chart">
+            <div class="threat-chart__empty">No scan data yet. Run Gmail Scanner or Analyze an email to see results.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Results -->
+      <div class="panel">
+        <div class="panel__header">
+          <h2 class="panel__title">Recent Results</h2>
+          <span class="panel__count" id="recent-count">0 emails</span>
+        </div>
+        <div class="panel__body" id="recent-results">
+          <div class="empty-state">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
+              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>
+            </svg>
+            <p>Scan emails to see results here</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ════════════ ANALYZE VIEW ════════════ -->
+    <section class="view" id="view-analyze">
+      <div class="view__header">
+        <div>
+          <h1 class="view__title">Email Analyzer</h1>
+          <p class="view__subtitle">Paste raw email content (including headers) for analysis</p>
+        </div>
+      </div>
+
+      <div class="analyze-grid">
+        <div class="panel analyze-input-panel">
+          <div class="panel__header">
+            <h2 class="panel__title">Raw Email Input</h2>
+            <button class="btn btn--outline btn--sm" id="load-sample-btn">Load Sample</button>
+          </div>
+          <div class="panel__body">
+            <textarea class="analyze-textarea" id="email-input" placeholder="Paste raw email here including headers...&#10;&#10;From: sender@example.com&#10;Reply-To: different@example.com&#10;Subject: Urgent: Verify your account&#10;&#10;Dear Customer, click here to verify..."></textarea>
+            <div class="analyze-actions">
+              <button class="btn btn--primary" id="analyze-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                <span>Analyze Email</span>
+              </button>
+              <button class="btn btn--ghost btn--sm" id="clear-input-btn">Clear</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel analyze-result-panel">
+          <div class="panel__header">
+            <h2 class="panel__title">Analysis Result</h2>
+          </div>
+          <div class="panel__body" id="analyze-result">
+            <div class="empty-state">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              </svg>
+              <p>Paste an email and click Analyze to see results</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ════════════ GMAIL VIEW ════════════ -->
+    <section class="view" id="view-gmail">
+      <div class="view__header">
+        <div>
+          <h1 class="view__title">Gmail Scanner</h1>
+          <p class="view__subtitle">Scan your Gmail inbox for phishing threats via OAuth</p>
+        </div>
+        <div class="view__actions">
+          <label class="select-label" for="email-count">Emails:</label>
+          <select id="email-count" class="select">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+            <option value="50">50</option>
+          </select>
+          <button class="btn btn--primary" id="scan-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            <span>Scan Inbox</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__body" id="gmail-body">
+          <div class="empty-state" id="gmail-empty">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
+              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>
+            </svg>
+            <p>Click <strong>Scan Inbox</strong> to fetch and analyze your recent Gmail emails</p>
+            <p class="empty-state__hint">Requires Gmail OAuth — a browser window will open on first use</p>
+          </div>
+          <div id="gmail-list" class="email-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ════════════ ENGINES VIEW ════════════ -->
+    <section class="view" id="view-engines">
+      <div class="view__header">
+        <div>
+          <h1 class="view__title">Detection Engines</h1>
+          <p class="view__subtitle">20 rule-based engines — deterministic, explainable, zero ML</p>
+        </div>
+      </div>
+
+      <div class="engines-filter">
+        <button class="filter-btn active" data-filter="all">All (20)</button>
+        <button class="filter-btn" data-filter="header">Header Analysis</button>
+        <button class="filter-btn" data-filter="domain">Domain Intelligence</button>
+        <button class="filter-btn" data-filter="content">Content Analysis</button>
+        <button class="filter-btn" data-filter="reputation">Reputation Checks</button>
+      </div>
+
+      <div class="engines-grid" id="engines-grid">
+        <!-- Populated by JS -->
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Mobile sidebar toggle -->
+  <button class="mobile-toggle" id="mobile-toggle" aria-label="Toggle menu">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>
+    </svg>
+  </button>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>
+
+```
+
+1. **Dashboard** — Stats cards, threat distribution bar chart, recent scan results
+2. **Analyze Email** — Manual raw email paste → detailed verdict card with engine breakdown
+3. **Gmail Scanner** — OAuth-based inbox scanning with expandable result cards
+4. **Detection Engines** — All 20 engines with descriptions, filterable by category
+
+### [style.css](file:///Users/david/fish/static/style.css) — Command Center Design
+
+```diff:style.css
+/* ============================================
+   PHISHING DETECTOR — PREMIUM DASHBOARD CSS
+   ============================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ---------- Design Tokens ---------- */
+:root {
+  /* Background */
+  --bg-primary: #0a0e1a;
+  --bg-secondary: #111827;
+  --bg-card: rgba(17, 24, 39, 0.6);
+  --bg-card-hover: rgba(17, 24, 39, 0.8);
+  --bg-input: rgba(15, 23, 42, 0.8);
+
+  /* Text */
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  /* Accents */
+  --accent-blue: #3b82f6;
+  --accent-blue-glow: rgba(59, 130, 246, 0.25);
+  --accent-emerald: #10b981;
+  --accent-emerald-glow: rgba(16, 185, 129, 0.2);
+  --accent-amber: #f59e0b;
+  --accent-amber-glow: rgba(245, 158, 11, 0.2);
+  --accent-rose: #f43f5e;
+  --accent-rose-glow: rgba(244, 63, 94, 0.2);
+  --accent-purple: #a855f7;
+
+  /* Glass */
+  --glass-border: rgba(148, 163, 184, 0.08);
+  --glass-blur: 20px;
+
+  /* Radius & spacing */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+
+  /* Shadows */
+  --shadow-card: 0 4px 32px rgba(0, 0, 0, 0.3);
+  --shadow-glow-blue: 0 0 20px rgba(59, 130, 246, 0.15);
+  --shadow-glow-emerald: 0 0 20px rgba(16, 185, 129, 0.15);
+  --shadow-glow-rose: 0 0 20px rgba(244, 63, 94, 0.15);
+
+  /* Transitions */
+  --transition-fast: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-smooth: 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-spring: 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ---------- Reset & Base ---------- */
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- Animated Background ---------- */
+.bg-gradient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.bg-gradient .orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  opacity: 0.12;
+  animation: orbFloat 20s ease-in-out infinite;
+}
+
+.bg-gradient .orb-1 {
+  width: 600px;
+  height: 600px;
+  background: var(--accent-blue);
+  top: -200px;
+  right: -100px;
+  animation-delay: 0s;
+}
+
+.bg-gradient .orb-2 {
+  width: 500px;
+  height: 500px;
+  background: var(--accent-purple);
+  bottom: -150px;
+  left: -100px;
+  animation-delay: -7s;
+}
+
+.bg-gradient .orb-3 {
+  width: 400px;
+  height: 400px;
+  background: var(--accent-emerald);
+  top: 50%;
+  left: 50%;
+  animation-delay: -14s;
+}
+
+@keyframes orbFloat {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(30px, -40px) scale(1.05); }
+  66% { transform: translate(-20px, 30px) scale(0.95); }
+}
+
+/* ---------- Grid noise overlay ---------- */
+.bg-gradient::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(148, 163, 184, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* ---------- Layout ---------- */
+.app {
+  position: relative;
+  z-index: 1;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+}
+
+/* ---------- Header ---------- */
+.header {
+  text-align: center;
+  margin-bottom: 48px;
+}
+
+.header__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 20px;
+  backdrop-filter: blur(var(--glass-blur));
+}
+
+.header__status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-emerald);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
+  50% { opacity: 0.7; box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+}
+
+.header__title {
+  font-size: 3rem;
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+  margin-bottom: 12px;
+  background: linear-gradient(135deg, var(--text-primary) 0%, var(--accent-blue) 50%, var(--accent-purple) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.header__subtitle {
+  font-size: 1.05rem;
+  color: var(--text-secondary);
+  font-weight: 400;
+  max-width: 520px;
+  margin: 0 auto;
+  line-height: 1.6;
+}
+
+/* ---------- Stats Row ---------- */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 40px;
+}
+
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  backdrop-filter: blur(var(--glass-blur));
+  text-align: center;
+  transition: transform var(--transition-fast), border-color var(--transition-fast);
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(148, 163, 184, 0.15);
+}
+
+.stat-card__icon {
+  font-size: 1.5rem;
+  margin-bottom: 8px;
+}
+
+.stat-card__value {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.stat-card__label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 4px;
+}
+
+/* ---------- Main Grid ---------- */
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 24px;
+  align-items: start;
+}
+
+/* ---------- Glass Card ---------- */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(var(--glass-blur));
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.card__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.card__header-icon {
+  font-size: 1.2rem;
+}
+
+.card__header-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.card__body {
+  padding: 24px;
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  outline: none;
+  position: relative;
+  overflow: hidden;
+  text-decoration: none;
+}
+
+.btn--primary {
+  background: linear-gradient(135deg, var(--accent-blue), #6366f1);
+  color: white;
+  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.3);
+}
+
+.btn--primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(59, 130, 246, 0.4);
+}
+
+.btn--primary:active {
+  transform: translateY(0);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--glass-border);
+}
+
+.btn--ghost:hover {
+  background: rgba(148, 163, 184, 0.05);
+  color: var(--text-primary);
+}
+
+.btn--small {
+  padding: 8px 16px;
+  font-size: 0.8rem;
+}
+
+.btn--loading {
+  pointer-events: none;
+  opacity: 0.8;
+}
+
+.btn--loading .btn__text {
+  visibility: hidden;
+}
+
+.btn--loading::after {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---------- Inbox Controls ---------- */
+.inbox-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.inbox-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.inbox-select {
+  background: var(--bg-input);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.8rem;
+  outline: none;
+  cursor: pointer;
+  appearance: auto;
+}
+
+.inbox-select:focus {
+  border-color: var(--accent-blue);
+}
+
+/* ---------- Inbox Empty State ---------- */
+.inbox-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 56px 24px;
+  color: var(--text-muted);
+}
+
+.inbox-empty__icon {
+  font-size: 3.5rem;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.inbox-empty__text {
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.inbox-empty__hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ---------- Inbox Error ---------- */
+.inbox-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  background: var(--accent-rose-glow);
+  border: 1px solid rgba(244, 63, 94, 0.2);
+  border-radius: var(--radius-md);
+  color: var(--accent-rose);
+  font-size: 0.85rem;
+}
+
+.inbox-error__icon {
+  font-size: 1.2rem;
+}
+
+/* ---------- Email Cards ---------- */
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.inbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.email-card {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  animation: fadeSlideUp 0.4s ease both;
+  border-left: 3px solid var(--glass-border);
+}
+
+.email-card--safe { border-left-color: var(--accent-emerald); }
+.email-card--suspicious { border-left-color: var(--accent-amber); }
+.email-card--phishing { border-left-color: var(--accent-rose); }
+
+.email-card:hover {
+  border-color: rgba(148, 163, 184, 0.15);
+}
+
+.email-card__header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  cursor: pointer;
+  background: var(--bg-input);
+  transition: background var(--transition-fast);
+  user-select: none;
+}
+
+.email-card__header:hover {
+  background: rgba(15, 23, 42, 0.95);
+}
+
+.email-card__verdict-icon {
+  font-size: 1.4rem;
+  flex-shrink: 0;
+}
+
+.email-card__info {
+  flex: 1;
+  overflow: hidden;
+}
+
+.email-card__subject {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+
+.email-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.email-card__verdict-tag {
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.email-card__verdict-tag--safe {
+  background: var(--accent-emerald-glow);
+  color: var(--accent-emerald);
+}
+
+.email-card__verdict-tag--suspicious {
+  background: var(--accent-amber-glow);
+  color: var(--accent-amber);
+}
+
+.email-card__verdict-tag--phishing {
+  background: var(--accent-rose-glow);
+  color: var(--accent-rose);
+}
+
+.email-card__score {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.email-card__chevron {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  transition: transform var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.email-card.open .email-card__chevron {
+  transform: rotate(180deg);
+}
+
+.email-card__body {
+  display: none;
+  padding: 18px;
+  border-top: 1px solid var(--glass-border);
+  animation: fadeSlideUp 0.3s ease both;
+}
+
+.email-card.open .email-card__body {
+  display: block;
+}
+
+.email-card__reasons-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 10px;
+}
+
+.email-card__reason {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(15, 23, 42, 0.5);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  animation: fadeSlideUp 0.3s ease both;
+  border-left: 2px solid var(--accent-blue);
+}
+
+.email-card__reason:nth-child(odd) {
+  border-left-color: var(--accent-purple);
+}
+
+.email-card__reason-icon {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.email-card__section-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 10px;
+}
+
+.email-card__sender {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.email-card__domain {
+  font-size: 0.7rem;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--accent-blue);
+  background: var(--accent-blue-glow);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+/* ---------- Engine Breakdown Chips ---------- */
+.engine-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.engine-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  transition: all var(--transition-fast);
+  flex-wrap: wrap;
+}
+
+.engine-chip--active {
+  border-color: rgba(244, 63, 94, 0.2);
+  background: rgba(244, 63, 94, 0.06);
+  color: var(--text-secondary);
+}
+
+.engine-chip__icon {
+  font-size: 0.9rem;
+}
+
+.engine-chip__name {
+  font-weight: 600;
+}
+
+.engine-chip__score {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--accent-rose);
+}
+
+.engine-chip__score--ok {
+  color: var(--accent-emerald);
+}
+
+.engine-chip__extra {
+  width: 100%;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Skeleton Loading ---------- */
+.email-card--skeleton {
+  padding: 20px;
+  border-left-color: var(--glass-border);
+}
+
+.skeleton {
+  border-radius: 4px;
+  background: linear-gradient(90deg,
+    rgba(148, 163, 184, 0.06) 0%,
+    rgba(148, 163, 184, 0.12) 50%,
+    rgba(148, 163, 184, 0.06) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton--line {
+  height: 14px;
+  margin-bottom: 10px;
+}
+
+.skeleton--w40 { width: 40%; }
+.skeleton--w60 { width: 60%; }
+.skeleton--w80 { width: 80%; }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ---------- API Reference Section ---------- */
+.api-section {
+  margin-top: 40px;
+}
+
+.api-section__badge {
+  margin-left: auto;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--accent-purple);
+  background: rgba(168, 85, 247, 0.1);
+  padding: 3px 10px;
+  border-radius: 999px;
+  letter-spacing: 0.03em;
+}
+
+.api-section__desc {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 24px;
+}
+
+/* Endpoint accordion */
+.api-endpoint {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
+  overflow: hidden;
+  transition: border-color var(--transition-fast);
+}
+
+.api-endpoint:hover {
+  border-color: rgba(148, 163, 184, 0.15);
+}
+
+.api-endpoint__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  background: var(--bg-input);
+  transition: background var(--transition-fast);
+  user-select: none;
+}
+
+.api-endpoint__header:hover {
+  background: rgba(15, 23, 42, 0.95);
+}
+
+.api-endpoint__desc {
+  flex: 1;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.api-endpoint__chevron {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  transition: transform var(--transition-fast);
+}
+
+.api-endpoint.open .api-endpoint__chevron {
+  transform: rotate(180deg);
+}
+
+.api-endpoint__body {
+  display: none;
+  padding: 20px;
+  border-top: 1px solid var(--glass-border);
+  animation: fadeSlideUp 0.3s ease both;
+}
+
+.api-endpoint.open .api-endpoint__body {
+  display: block;
+}
+
+/* Method badges */
+.api-method {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.api-method--get {
+  background: var(--accent-emerald-glow);
+  color: var(--accent-emerald);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.api-method--post {
+  background: var(--accent-blue-glow);
+  color: var(--accent-blue);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+}
+
+/* Path */
+.api-path {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* Detail blocks */
+.api-detail {
+  margin-bottom: 16px;
+}
+
+.api-detail__label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.api-detail__text {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+/* Code blocks */
+.api-code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  background: rgba(15, 23, 42, 0.6);
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: var(--accent-blue);
+}
+
+.api-pre {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 0;
+}
+
+.api-pre code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.api-comment {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Parameters */
+.api-param {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(15, 23, 42, 0.5);
+  border-radius: var(--radius-sm);
+}
+
+.api-param__type {
+  font-size: 0.75rem;
+  color: var(--accent-purple);
+  font-weight: 500;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.api-param__default {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+/* Score thresholds */
+.api-thresholds {
+  display: flex;
+  gap: 10px;
+}
+
+.api-threshold {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+
+.api-threshold--safe {
+  background: var(--accent-emerald-glow);
+  border: 1px solid rgba(16, 185, 129, 0.15);
+}
+
+.api-threshold--suspicious {
+  background: var(--accent-amber-glow);
+  border: 1px solid rgba(245, 158, 11, 0.15);
+}
+
+.api-threshold--phishing {
+  background: var(--accent-rose-glow);
+  border: 1px solid rgba(244, 63, 94, 0.15);
+}
+
+.api-threshold__range {
+  display: block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.api-threshold--safe .api-threshold__range { color: var(--accent-emerald); }
+.api-threshold--suspicious .api-threshold__range { color: var(--accent-amber); }
+.api-threshold--phishing .api-threshold__range { color: var(--accent-rose); }
+
+.api-threshold__label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+/* Try it */
+.api-tryit {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.api-tryit__hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.api-response {
+  width: 100%;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin-top: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  color: var(--accent-emerald);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  display: none;
+}
+
+.api-response.visible {
+  display: block;
+  animation: fadeSlideUp 0.3s ease both;
+}
+
+.api-response.error {
+  color: var(--accent-rose);
+}
+
+.btn--small {
+  padding: 8px 16px;
+  font-size: 0.8rem;
+}
+
+/* Detection engines grid */
+.api-engines {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--glass-border);
+}
+
+.api-engines__grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.api-engine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bg-input);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
+}
+
+.api-engine:hover {
+  border-color: rgba(148, 163, 184, 0.15);
+  transform: translateY(-1px);
+}
+
+.api-engine__icon {
+  font-size: 1.1rem;
+}
+
+.api-engine__name {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+/* ---------- Footer ---------- */
+.footer {
+  text-align: center;
+  margin-top: 56px;
+  padding-top: 24px;
+  border-top: 1px solid var(--glass-border);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.footer a {
+  color: var(--accent-blue);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.footer a:hover {
+  text-decoration: underline;
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 900px) {
+  .main-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .header__title {
+    font-size: 2.2rem;
+  }
+
+  .stats {
+    grid-template-columns: 1fr;
+  }
+
+  .api-engines__grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .app {
+    padding: 24px 16px 60px;
+  }
+
+  .header__title {
+    font-size: 1.8rem;
+  }
+
+  .card__body {
+    padding: 16px;
+  }
+
+  .analyzer-textarea {
+    min-height: 140px;
+  }
+
+  .api-engines__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .api-thresholds {
+    flex-direction: column;
+  }
+}
+===
+/* ═══════════════════════════════════════════════════
+   PHISHGUARD — COMMAND CENTER DESIGN SYSTEM
+   Cybersecurity-grade UI · Not your average SaaS template
+   ═══════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ─── Tokens ─── */
+:root {
+  --bg-root: #050a14;
+  --bg-sidebar: #080d1a;
+  --bg-main: #0a1020;
+  --bg-panel: #0d1424;
+  --bg-panel-hover: #111a2e;
+  --bg-input: #0b1222;
+  --bg-raised: #131d32;
+
+  --border: rgba(52, 76, 120, 0.22);
+  --border-hover: rgba(52, 76, 120, 0.38);
+  --border-active: rgba(34, 211, 238, 0.3);
+
+  --text-primary: #e2e8f0;
+  --text-secondary: #8b9cc0;
+  --text-muted: #526280;
+
+  --cyan: #22d3ee;
+  --cyan-dim: rgba(34, 211, 238, 0.12);
+  --cyan-glow: rgba(34, 211, 238, 0.06);
+  --teal: #14b8a6;
+  --teal-dim: rgba(20, 184, 166, 0.12);
+
+  --red: #ef4444;
+  --red-dim: rgba(239, 68, 68, 0.12);
+  --red-glow: rgba(239, 68, 68, 0.06);
+
+  --amber: #f59e0b;
+  --amber-dim: rgba(245, 158, 11, 0.12);
+
+  --green: #22c55e;
+  --green-dim: rgba(34, 197, 94, 0.12);
+
+  --blue: #3b82f6;
+  --blue-dim: rgba(59, 130, 246, 0.12);
+
+  --sidebar-w: 236px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ─── Reset ─── */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg-root);
+  color: var(--text-primary);
+  min-height: 100vh;
+  display: flex;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Subtle scanline overlay on body ─── */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(34, 211, 238, 0.008) 2px,
+    rgba(34, 211, 238, 0.008) 4px
+  );
+}
+
+/* ═══════════════════════════════
+   SIDEBAR
+   ═══════════════════════════════ */
+.sidebar {
+  width: var(--sidebar-w);
+  min-height: 100vh;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 100;
+  transition: transform 0.3s var(--ease);
+}
+
+.sidebar__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 20px 28px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar__logo {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--cyan-dim), var(--teal-dim));
+  border: 1px solid rgba(34, 211, 238, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--cyan);
+  flex-shrink: 0;
+}
+
+.sidebar__name {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+  display: block;
+}
+
+.sidebar__version {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  display: block;
+  margin-top: 2px;
+}
+
+.sidebar__nav {
+  flex: 1;
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+  position: relative;
+}
+
+.nav-item:hover {
+  background: rgba(34, 211, 238, 0.04);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background: var(--cyan-dim);
+  color: var(--cyan);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  background: var(--cyan);
+  border-radius: 0 3px 3px 0;
+}
+
+.nav-item svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.nav-item.active svg { opacity: 1; }
+
+.nav-badge {
+  margin-left: auto;
+  font-size: 0.65rem;
+  font-weight: 700;
+  background: var(--cyan-dim);
+  color: var(--cyan);
+  padding: 2px 7px;
+  border-radius: 999px;
+  letter-spacing: 0.03em;
+}
+
+.sidebar__footer {
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot--online {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+  animation: statusPulse 2.5s ease-in-out infinite;
+}
+
+.status-dot--offline {
+  background: var(--text-muted);
+}
+
+@keyframes statusPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ═══════════════════════════════
+   MAIN AREA
+   ═══════════════════════════════ */
+.main {
+  margin-left: var(--sidebar-w);
+  flex: 1;
+  min-height: 100vh;
+  padding: 32px 36px 80px;
+  max-width: 1200px;
+}
+
+/* ─── Views (SPA) ─── */
+.view { display: none; }
+.view.active { display: block; animation: viewFadeIn 0.35s var(--ease); }
+
+@keyframes viewFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.view__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.view__title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  color: var(--text-primary);
+}
+
+.view__subtitle {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-weight: 400;
+}
+
+.view__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════
+   STAT CARDS
+   ═══════════════════════════════ */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px 14px;
+  transition: border-color 0.25s var(--ease);
+}
+
+.stat-card:hover {
+  border-color: var(--border-hover);
+}
+
+.stat-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.stat-card__label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+}
+
+.stat-card__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stat-card__icon--blue { background: var(--blue-dim); color: var(--blue); }
+.stat-card__icon--red { background: var(--red-dim); color: var(--red); }
+.stat-card__icon--amber { background: var(--amber-dim); color: var(--amber); }
+.stat-card__icon--green { background: var(--green-dim); color: var(--green); }
+
+.stat-card__value {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  margin-bottom: 10px;
+}
+
+.stat-card__bar {
+  height: 3px;
+  background: rgba(52, 76, 120, 0.15);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.stat-card__bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.8s var(--ease);
+}
+
+.stat-card__bar-fill--blue { background: var(--blue); }
+.stat-card__bar-fill--red { background: var(--red); }
+.stat-card__bar-fill--amber { background: var(--amber); }
+.stat-card__bar-fill--green { background: var(--green); }
+
+/* ═══════════════════════════════
+   PANELS (Cards)
+   ═══════════════════════════════ */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+
+.panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel__title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.panel__count {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.panel__body {
+  padding: 20px;
+}
+
+/* ═══════════════════════════════
+   BUTTONS
+   ═══════════════════════════════ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 9px 18px;
+  border: none;
+  border-radius: var(--radius);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+  outline: none;
+  text-decoration: none;
+  white-space: nowrap;
+  position: relative;
+}
+
+.btn--primary {
+  background: var(--cyan);
+  color: #050a14;
+}
+
+.btn--primary:hover {
+  background: #06b6d4;
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.2);
+}
+
+.btn--primary:active { transform: scale(0.97); }
+
+.btn--outline {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.btn--outline:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+  background: rgba(52, 76, 120, 0.06);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.btn--ghost:hover { color: var(--text-secondary); }
+
+.btn--sm { padding: 6px 12px; font-size: 0.73rem; }
+
+.btn--loading {
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.btn--loading::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(5, 10, 20, 0.3);
+  border-top-color: #050a14;
+  border-radius: 50%;
+  animation: spin 0.5s linear infinite;
+}
+
+.btn--loading > * { visibility: hidden; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ═══════════════════════════════
+   SELECT & INPUT
+   ═══════════════════════════════ */
+.select-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 7px 12px;
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.8rem;
+  outline: none;
+  cursor: pointer;
+  appearance: auto;
+  transition: border-color 0.2s var(--ease);
+}
+
+.select:focus { border-color: var(--cyan); }
+
+/* ═══════════════════════════════
+   EMPTY STATE
+   ═══════════════════════════════ */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 48px 20px;
+  gap: 12px;
+  color: var(--text-muted);
+}
+
+.empty-state p {
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.empty-state__hint {
+  font-size: 0.75rem !important;
+  color: var(--text-muted) !important;
+  font-style: italic;
+}
+
+/* ═══════════════════════════════
+   THREAT CHART (CSS-only bar chart)
+   ═══════════════════════════════ */
+.threat-chart__empty {
+  text-align: center;
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.threat-chart__bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 120px;
+  padding: 0 4px;
+}
+
+.threat-bar {
+  flex: 1;
+  border-radius: 4px 4px 0 0;
+  min-height: 4px;
+  transition: height 0.6s var(--ease);
+  position: relative;
+  cursor: default;
+}
+
+.threat-bar--safe { background: var(--green); }
+.threat-bar--suspicious { background: var(--amber); }
+.threat-bar--phishing { background: var(--red); }
+
+.threat-chart__legend {
+  display: flex;
+  gap: 20px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.73rem;
+  color: var(--text-secondary);
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.legend-dot--safe { background: var(--green); }
+.legend-dot--suspicious { background: var(--amber); }
+.legend-dot--phishing { background: var(--red); }
+
+/* ═══════════════════════════════
+   EMAIL LIST / CARDS
+   ═══════════════════════════════ */
+.email-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+@keyframes cardSlideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.email-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 0.2s var(--ease);
+  animation: cardSlideIn 0.3s var(--ease) both;
+  border-left: 3px solid var(--border);
+}
+
+.email-card--safe { border-left-color: var(--green); }
+.email-card--suspicious { border-left-color: var(--amber); }
+.email-card--phishing { border-left-color: var(--red); }
+
+.email-card:hover { border-color: var(--border-hover); }
+
+.email-card__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  cursor: pointer;
+  background: var(--bg-raised);
+  transition: background 0.2s var(--ease);
+  user-select: none;
+}
+
+.email-card__header:hover { background: var(--bg-panel-hover); }
+
+.email-card__verdict-badge {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.email-card--safe .email-card__verdict-badge {
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.email-card--suspicious .email-card__verdict-badge {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+.email-card--phishing .email-card__verdict-badge {
+  background: var(--red-dim);
+  color: var(--red);
+}
+
+.email-card__info { flex: 1; min-width: 0; }
+
+.email-card__subject {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 3px;
+}
+
+.email-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.email-card__sender {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.email-card__tag {
+  font-size: 0.6rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.email-card__tag--safe { background: var(--green-dim); color: var(--green); }
+.email-card__tag--suspicious { background: var(--amber-dim); color: var(--amber); }
+.email-card__tag--phishing { background: var(--red-dim); color: var(--red); }
+
+.email-card__score {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.email-card__chevron {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  transition: transform 0.2s var(--ease);
+  flex-shrink: 0;
+}
+
+.email-card.open .email-card__chevron { transform: rotate(180deg); }
+
+.email-card__body {
+  display: none;
+  padding: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.email-card.open .email-card__body { display: block; }
+
+.email-card__section-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+/* Engine Chips */
+.engine-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.engine-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+  background: rgba(52, 76, 120, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  transition: all 0.2s var(--ease);
+}
+
+.engine-chip--active {
+  border-color: rgba(239, 68, 68, 0.2);
+  background: var(--red-glow);
+  color: var(--text-secondary);
+}
+
+.engine-chip__name { font-weight: 600; }
+
+.engine-chip__score {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--red);
+}
+
+.engine-chip__score--ok { color: var(--green); }
+
+/* Reasons list */
+.reason-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(52, 76, 120, 0.04);
+  border-left: 2px solid var(--cyan);
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 4px;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.reason-item:nth-child(even) { border-left-color: var(--teal); }
+
+.reason-item__icon {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  margin-top: 2px;
+}
+
+/* ═══════════════════════════════
+   ANALYZE VIEW
+   ═══════════════════════════════ */
+.analyze-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.analyze-textarea {
+  width: 100%;
+  min-height: 320px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.2s var(--ease);
+}
+
+.analyze-textarea:focus { border-color: var(--cyan); }
+
+.analyze-textarea::placeholder {
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.analyze-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+/* ═══════════════════════════════
+   VERDICT CARD (Analyze result)
+   ═══════════════════════════════ */
+.verdict-card {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.verdict-card__header {
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.verdict-card--safe .verdict-card__header { background: var(--green-dim); border-bottom: 1px solid rgba(34, 197, 94, 0.15); }
+.verdict-card--suspicious .verdict-card__header { background: var(--amber-dim); border-bottom: 1px solid rgba(245, 158, 11, 0.15); }
+.verdict-card--phishing .verdict-card__header { background: var(--red-dim); border-bottom: 1px solid rgba(239, 68, 68, 0.15); }
+
+.verdict-card__shield {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.verdict-card--safe .verdict-card__shield { background: rgba(34, 197, 94, 0.15); color: var(--green); }
+.verdict-card--suspicious .verdict-card__shield { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+.verdict-card--phishing .verdict-card__shield { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+
+.verdict-card__verdict {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.verdict-card--safe .verdict-card__verdict { color: var(--green); }
+.verdict-card--suspicious .verdict-card__verdict { color: var(--amber); }
+.verdict-card--phishing .verdict-card__verdict { color: var(--red); }
+
+.verdict-card__score-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.verdict-card__score-label strong {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-secondary);
+}
+
+.verdict-card__body { padding: 16px 20px; }
+
+/* ═══════════════════════════════
+   ENGINES VIEW
+   ═══════════════════════════════ */
+.engines-filter {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.filter-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.73rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+}
+
+.filter-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.filter-btn.active {
+  background: var(--cyan-dim);
+  border-color: rgba(34, 211, 238, 0.25);
+  color: var(--cyan);
+}
+
+.engines-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.engine-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  transition: all 0.25s var(--ease);
+  animation: cardSlideIn 0.3s var(--ease) both;
+}
+
+.engine-card:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-panel-hover);
+}
+
+.engine-card__top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.engine-card__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.engine-card__icon--header { background: var(--blue-dim); color: var(--blue); }
+.engine-card__icon--domain { background: var(--cyan-dim); color: var(--cyan); }
+.engine-card__icon--content { background: var(--amber-dim); color: var(--amber); }
+.engine-card__icon--reputation { background: var(--green-dim); color: var(--green); }
+
+.engine-card__name {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.engine-card__category {
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+.engine-card__desc {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* ═══════════════════════════════
+   SKELETON
+   ═══════════════════════════════ */
+.skeleton-card {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+.skeleton-line {
+  height: 12px;
+  border-radius: 4px;
+  background: linear-gradient(90deg,
+    rgba(52, 76, 120, 0.08) 0%,
+    rgba(52, 76, 120, 0.16) 50%,
+    rgba(52, 76, 120, 0.08) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  margin-bottom: 8px;
+}
+
+.skeleton-line--w40 { width: 40%; }
+.skeleton-line--w60 { width: 60%; }
+.skeleton-line--w80 { width: 80%; }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ═══════════════════════════════
+   ERROR
+   ═══════════════════════════════ */
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--red-glow);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+  border-radius: var(--radius);
+  color: var(--red);
+  font-size: 0.82rem;
+}
+
+/* ═══════════════════════════════
+   MOBILE TOGGLE
+   ═══════════════════════════════ */
+.mobile-toggle {
+  display: none;
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  z-index: 200;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ═══════════════════════════════
+   RESPONSIVE
+   ═══════════════════════════════ */
+@media (max-width: 1024px) {
+  .stats-row { grid-template-columns: repeat(2, 1fr); }
+  .analyze-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 768px) {
+  .mobile-toggle { display: flex; }
+
+  .sidebar {
+    transform: translateX(-100%);
+  }
+
+  .sidebar.open { transform: translateX(0); }
+
+  .main {
+    margin-left: 0;
+    padding: 72px 16px 60px;
+  }
+
+  .stats-row { grid-template-columns: 1fr 1fr; }
+  .engines-grid { grid-template-columns: 1fr; }
+
+  .view__header { flex-direction: column; }
+  .view__actions { width: 100%; flex-wrap: wrap; }
+
+  .analyze-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 480px) {
+  .stats-row { grid-template-columns: 1fr; }
+}
+
+```
+
+- Space Grotesk headings (geometric, techy)
+- Deep navy palette (#050a14) with cyan accents (#22d3ee)
+- Subtle CRT scanline overlay
+- SVG icons instead of emoji
+- Proper sidebar layout with active indicators
+- Responsive down to mobile
+
+### [script.js](file:///Users/david/fish/static/script.js) — SPA Controller
+
+```diff:script.js
+// ============================================
+// PHISHING DETECTOR — GMAIL DASHBOARD JS
+// ============================================
+
+const API_BASE = '';
+
+// ---------- State ----------
+let stats = { scanned: 0, threats: 0, safe: 0 };
+try {
+  const saved = JSON.parse(sessionStorage.getItem('phish_stats'));
+  if (saved) stats = saved;
+} catch(e) {}
+
+// ---------- DOM refs ----------
+const scanBtn = document.getElementById('scan-btn');
+const emailCountSelect = document.getElementById('email-count');
+const inboxList = document.getElementById('inbox-list');
+const inboxEmpty = document.getElementById('inbox-empty');
+const statScanned = document.getElementById('stat-scanned');
+const statThreats = document.getElementById('stat-threats');
+const statSafe = document.getElementById('stat-safe');
+
+// ---------- Init ----------
+function init() {
+  renderStats();
+  scanBtn.addEventListener('click', handleScan);
+  checkStatus();
+}
+
+function checkStatus() {
+  fetch(`${API_BASE}/api/health`)
+    .then(r => r.json())
+    .then(data => {
+      const dot = document.querySelector('.header__status-dot');
+      if (dot && data.status === 'online') {
+        dot.style.background = 'var(--accent-emerald)';
+      }
+    })
+    .catch(() => {});
+}
+
+// ---------- Stats ----------
+function renderStats() {
+  animateCounter(statScanned, stats.scanned);
+  animateCounter(statThreats, stats.threats);
+  animateCounter(statSafe, stats.safe);
+}
+
+function animateCounter(el, target) {
+  const current = parseInt(el.textContent) || 0;
+  if (current === target) { el.textContent = target; return; }
+  const duration = 600;
+  const start = performance.now();
+  function step(time) {
+    const progress = Math.min((time - start) / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    el.textContent = Math.round(current + (target - current) * eased);
+    if (progress < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+function updateStats(results) {
+  results.forEach(r => {
+    const verdict = r.analysis?.verdict;
+    stats.scanned++;
+    if (verdict === 'PHISHING' || verdict === 'SUSPICIOUS') stats.threats++;
+    if (verdict === 'SAFE') stats.safe++;
+  });
+  sessionStorage.setItem('phish_stats', JSON.stringify(stats));
+  renderStats();
+}
+
+// ---------- Gmail Scan ----------
+async function handleScan() {
+  const count = emailCountSelect.value;
+
+  scanBtn.classList.add('btn--loading');
+  inboxEmpty.style.display = 'none';
+  inboxList.innerHTML = '';
+
+  // Show skeleton loading
+  for (let i = 0; i < Math.min(count, 5); i++) {
+    inboxList.innerHTML += `
+      <div class="email-card email-card--skeleton">
+        <div class="skeleton skeleton--line skeleton--w40"></div>
+        <div class="skeleton skeleton--line skeleton--w80"></div>
+        <div class="skeleton skeleton--line skeleton--w60"></div>
+      </div>
+    `;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/scan-gmail?max_results=${count}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const data = await res.json();
+
+    // Handle auth failure / no emails
+    if (data.message) {
+      inboxList.innerHTML = '';
+      inboxEmpty.style.display = 'flex';
+      inboxEmpty.querySelector('.inbox-empty__text').innerHTML =
+        `<strong>${escapeHtml(data.message)}</strong>`;
+      inboxEmpty.querySelector('.inbox-empty__hint').textContent =
+        'Check the terminal for OAuth prompts.';
+      return;
+    }
+
+    // Render results
+    inboxList.innerHTML = '';
+    updateStats(data);
+    data.forEach((email, i) => renderEmailCard(email, i));
+
+  } catch (err) {
+    inboxList.innerHTML = `
+      <div class="inbox-error">
+        <span class="inbox-error__icon">❌</span>
+        <span>${escapeHtml(err.message)}</span>
+      </div>
+    `;
+  } finally {
+    scanBtn.classList.remove('btn--loading');
+  }
+}
+
+// ---------- Render Email Card ----------
+const ENGINE_LABELS = {
+  keywords: { icon: '🔑', name: 'Keywords' },
+  urls: { icon: '🔗', name: 'URLs' },
+  sender: { icon: '👤', name: 'Sender' },
+  reply_to: { icon: '↩️', name: 'Reply-To' },
+  whois: { icon: '🌐', name: 'WHOIS' },
+  levenshtein: { icon: '📐', name: 'Typosquat' },
+  entropy: { icon: '📊', name: 'Entropy' },
+  safe_browsing: { icon: '🛡️', name: 'Safe Browse' },
+  header_forensics: { icon: '✉️', name: 'SPF/DKIM' },
+};
+
+function renderEmailCard(email, index) {
+  const a = email.analysis;
+  const verdict = a.verdict.toLowerCase();
+  const icon = a.verdict === 'SAFE' ? '🛡️' : a.verdict === 'SUSPICIOUS' ? '⚡' : '🚨';
+  const cardId = `email-card-${index}`;
+  const sender = email.sender || '';
+  const domain = a.sender_domain || '';
+
+  const card = document.createElement('div');
+  card.className = `email-card email-card--${verdict}`;
+  card.id = cardId;
+  card.style.animationDelay = `${index * 0.06}s`;
+
+  // Build engine breakdown
+  let enginesHtml = '';
+  if (a.engines) {
+    enginesHtml = `<div class="engine-grid">`;
+    for (const [key, info] of Object.entries(a.engines)) {
+      const label = ENGINE_LABELS[key] || { icon: '⚙️', name: key };
+      const score = info.score || 0;
+      const active = score > 0;
+      const cls = active ? 'engine-chip--active' : '';
+      let extra = '';
+      if (key === 'whois' && info.domains_checked && info.domains_checked.length > 0) {
+        extra = ` · ${info.domains_checked.join(', ')}`;
+      }
+      if (key === 'urls' && info.count > 0) {
+        extra = ` · ${info.count} found`;
+      }
+      if (key === 'keywords' && info.hits > 0) {
+        extra = ` · ${info.hits} hits`;
+      }
+      enginesHtml += `
+        <div class="engine-chip ${cls}" title="${label.name}: score ${score}">
+          <span class="engine-chip__icon">${label.icon}</span>
+          <span class="engine-chip__name">${label.name}</span>
+          ${active ? `<span class="engine-chip__score">+${score}</span>` : '<span class="engine-chip__score engine-chip__score--ok">✓</span>'}
+          ${extra ? `<span class="engine-chip__extra">${escapeHtml(extra)}</span>` : ''}
+        </div>
+      `;
+    }
+    enginesHtml += `</div>`;
+  }
+
+  card.innerHTML = `
+    <div class="email-card__header" onclick="toggleEmailCard('${cardId}')">
+      <span class="email-card__verdict-icon">${icon}</span>
+      <div class="email-card__info">
+        <div class="email-card__subject">${escapeHtml(email.subject)}</div>
+        <div class="email-card__meta">
+          <span class="email-card__sender">${escapeHtml(sender)}</span>
+          ${domain ? `<span class="email-card__domain">${escapeHtml(domain)}</span>` : ''}
+          <span class="email-card__verdict-tag email-card__verdict-tag--${verdict}">${a.verdict}</span>
+          <span class="email-card__score">Score: ${a.score}</span>
+        </div>
+      </div>
+      <span class="email-card__chevron">▾</span>
+    </div>
+    <div class="email-card__body">
+      <div class="email-card__section-title">Engine Breakdown</div>
+      ${enginesHtml}
+      ${a.reasons && a.reasons.length > 0 ? `
+        <div class="email-card__section-title" style="margin-top: 16px;">Detection Details (${a.reasons.length})</div>
+        ${a.reasons.map((reason, i) => `
+          <div class="email-card__reason" style="animation-delay: ${i * 0.05}s">
+            <span class="email-card__reason-icon">›</span>
+            <span>${escapeHtml(reason)}</span>
+          </div>
+        `).join('')}
+      ` : `
+        <div class="email-card__section-title" style="margin-top: 16px;">Detection Details</div>
+        <div class="email-card__reason">
+          <span class="email-card__reason-icon">✓</span>
+          <span>No suspicious indicators detected.</span>
+        </div>
+      `}
+    </div>
+  `;
+
+  inboxList.appendChild(card);
+}
+
+function toggleEmailCard(id) {
+  const card = document.getElementById(id);
+  if (card) card.classList.toggle('open');
+}
+
+// ---------- API Reference ----------
+function toggleEndpoint(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+}
+
+async function tryEndpoint(method, path, endpointId) {
+  const responseEl = document.getElementById(`response-${endpointId}`);
+  if (!responseEl) return;
+
+  responseEl.className = 'api-response visible';
+  responseEl.textContent = 'Loading...';
+
+  try {
+    const res = await fetch(`${API_BASE}${path}`, { method });
+    const data = await res.json();
+    responseEl.textContent = JSON.stringify(data, null, 2);
+    responseEl.classList.remove('error');
+  } catch (err) {
+    responseEl.textContent = `Error: ${err.message}`;
+    responseEl.classList.add('error');
+  }
+}
+
+// ---------- Utilities ----------
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ---------- Start ----------
+document.addEventListener('DOMContentLoaded', init);
+===
+// ═══════════════════════════════════════════════════
+// PHISHGUARD — Command Center SPA Controller
+// ═══════════════════════════════════════════════════
+
+const API = '';
+
+// ─── State ───
+let stats = { scanned: 0, threats: 0, suspicious: 0, safe: 0 };
+let scanHistory = []; // Array of { verdict, score, subject, sender }
+try {
+  const s = JSON.parse(sessionStorage.getItem('pg_stats'));
+  if (s) stats = s;
+  const h = JSON.parse(sessionStorage.getItem('pg_history'));
+  if (h) scanHistory = h;
+} catch (e) {}
+
+// ─── Boot ───
+document.addEventListener('DOMContentLoaded', () => {
+  initNav();
+  initDashboard();
+  initAnalyze();
+  initGmail();
+  initEngines();
+  checkHealth();
+});
+
+// ═══════════════════════════════
+// NAVIGATION
+// ═══════════════════════════════
+function initNav() {
+  const navItems = document.querySelectorAll('.nav-item');
+  navItems.forEach(item => {
+    item.addEventListener('click', () => {
+      const viewId = item.dataset.view;
+      switchView(viewId);
+    });
+  });
+
+  // Mobile toggle
+  const toggle = document.getElementById('mobile-toggle');
+  const sidebar = document.getElementById('sidebar');
+  if (toggle && sidebar) {
+    toggle.addEventListener('click', () => {
+      sidebar.classList.toggle('open');
+    });
+  }
+
+  // Check URL hash
+  const hash = location.hash.replace('#', '');
+  if (hash && document.getElementById(`view-${hash}`)) {
+    switchView(hash);
+  }
+}
+
+function switchView(viewId) {
+  // Views
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  const target = document.getElementById(`view-${viewId}`);
+  if (target) target.classList.add('active');
+
+  // Nav items
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const navItem = document.querySelector(`.nav-item[data-view="${viewId}"]`);
+  if (navItem) navItem.classList.add('active');
+
+  // Close mobile sidebar
+  document.getElementById('sidebar')?.classList.remove('open');
+
+  // Update hash
+  location.hash = viewId;
+}
+
+// ═══════════════════════════════
+// HEALTH CHECK
+// ═══════════════════════════════
+function checkHealth() {
+  fetch(`${API}/api/health`)
+    .then(r => r.json())
+    .then(data => {
+      const statusEl = document.getElementById('system-status');
+      if (statusEl && data.status === 'online') {
+        statusEl.innerHTML = `
+          <span class="status-dot status-dot--online"></span>
+          <span class="status-text">Online · ${data.engines || 20} engines</span>
+        `;
+      }
+    })
+    .catch(() => {});
+}
+
+// ═══════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════
+function initDashboard() {
+  renderStats();
+  renderThreatChart();
+  renderRecentResults();
+}
+
+function renderStats() {
+  animateCounter('stat-scanned', stats.scanned);
+  animateCounter('stat-threats', stats.threats);
+  animateCounter('stat-suspicious', stats.suspicious);
+  animateCounter('stat-safe', stats.safe);
+
+  // Progress bars
+  const total = Math.max(stats.scanned, 1);
+  setBarWidth('stat-card-scanned', 100);
+  setBarWidth('stat-card-threats', (stats.threats / total) * 100);
+  setBarWidth('stat-card-suspicious', (stats.suspicious / total) * 100);
+  setBarWidth('stat-card-safe', (stats.safe / total) * 100);
+}
+
+function setBarWidth(cardId, pct) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  const fill = card.querySelector('.stat-card__bar-fill');
+  if (fill) fill.style.width = `${Math.min(pct, 100)}%`;
+}
+
+function animateCounter(elementId, target) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+
+  const current = parseInt(el.textContent) || 0;
+  if (current === target) { el.textContent = target; return; }
+
+  const duration = 500;
+  const start = performance.now();
+
+  function step(time) {
+    const progress = Math.min((time - start) / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    el.textContent = Math.round(current + (target - current) * eased);
+    if (progress < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+function updateStats(results) {
+  results.forEach(r => {
+    const v = r.analysis?.verdict;
+    stats.scanned++;
+    if (v === 'PHISHING') stats.threats++;
+    else if (v === 'SUSPICIOUS') stats.suspicious++;
+    else stats.safe++;
+
+    scanHistory.push({
+      verdict: v,
+      score: r.analysis?.score || 0,
+      subject: r.subject,
+      sender: r.sender,
+    });
+  });
+  saveState();
+  renderStats();
+  renderThreatChart();
+  renderRecentResults();
+}
+
+function resetStats() {
+  stats = { scanned: 0, threats: 0, suspicious: 0, safe: 0 };
+  scanHistory = [];
+  saveState();
+  renderStats();
+  renderThreatChart();
+  renderRecentResults();
+}
+
+function saveState() {
+  sessionStorage.setItem('pg_stats', JSON.stringify(stats));
+  sessionStorage.setItem('pg_history', JSON.stringify(scanHistory.slice(-100)));
+}
+
+// ─── Threat Chart ───
+function renderThreatChart() {
+  const container = document.getElementById('threat-chart');
+  if (!container) return;
+
+  if (scanHistory.length === 0) {
+    container.innerHTML = '<div class="threat-chart__empty">No scan data yet. Run Gmail Scanner or Analyze an email to see results.</div>';
+    return;
+  }
+
+  // Group last 20 results into bars
+  const recent = scanHistory.slice(-30);
+  let barsHtml = '<div class="threat-chart__bars">';
+  recent.forEach((item, i) => {
+    const cls = item.verdict === 'SAFE' ? 'safe' : item.verdict === 'SUSPICIOUS' ? 'suspicious' : 'phishing';
+    const height = Math.max(8, Math.min(item.score * 8, 100));
+    barsHtml += `<div class="threat-bar threat-bar--${cls}" style="height:${height}%;animation-delay:${i * 0.03}s" title="${esc(item.subject || 'Email')} — ${item.verdict} (Score: ${item.score})"></div>`;
+  });
+  barsHtml += '</div>';
+
+  barsHtml += `
+    <div class="threat-chart__legend">
+      <div class="legend-item"><span class="legend-dot legend-dot--safe"></span> Safe (${stats.safe})</div>
+      <div class="legend-item"><span class="legend-dot legend-dot--suspicious"></span> Suspicious (${stats.suspicious})</div>
+      <div class="legend-item"><span class="legend-dot legend-dot--phishing"></span> Phishing (${stats.threats})</div>
+    </div>
+  `;
+
+  container.innerHTML = barsHtml;
+}
+
+// ─── Recent Results ───
+function renderRecentResults() {
+  const container = document.getElementById('recent-results');
+  const countEl = document.getElementById('recent-count');
+  if (!container) return;
+
+  if (scanHistory.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
+          <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>
+        </svg>
+        <p>Scan emails to see results here</p>
+      </div>
+    `;
+    if (countEl) countEl.textContent = '0 emails';
+    return;
+  }
+
+  const recent = scanHistory.slice(-10).reverse();
+  if (countEl) countEl.textContent = `${scanHistory.length} total · showing last ${recent.length}`;
+
+  let html = '<div class="email-list">';
+  recent.forEach((item, i) => {
+    const cls = item.verdict === 'SAFE' ? 'safe' : item.verdict === 'SUSPICIOUS' ? 'suspicious' : 'phishing';
+    html += `
+      <div class="email-card email-card--${cls}" style="animation-delay:${i * 0.04}s">
+        <div class="email-card__header" style="cursor:default">
+          <div class="email-card__verdict-badge">
+            ${item.verdict === 'SAFE' ? '✓' : item.verdict === 'SUSPICIOUS' ? '!' : '✕'}
+          </div>
+          <div class="email-card__info">
+            <div class="email-card__subject">${esc(item.subject || 'No Subject')}</div>
+            <div class="email-card__meta">
+              <span class="email-card__sender">${esc(item.sender || 'Unknown')}</span>
+              <span class="email-card__tag email-card__tag--${cls}">${item.verdict}</span>
+              <span class="email-card__score">Score: ${item.score}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+// ═══════════════════════════════
+// ANALYZE VIEW
+// ═══════════════════════════════
+const SAMPLE_EMAIL = `From: security-alert@paypa1-verify.com
+Reply-To: phisher@gmail.com
+Return-Path: bounce@random-domain.xyz
+Subject: URGENT: Your PayPal account has been compromised!!!
+Authentication-Results: mx.google.com; spf=fail; dkim=fail; dmarc=fail
+X-Spam-Status: Yes
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="boundary123"
+
+--boundary123
+Content-Type: text/plain; charset="UTF-8"
+
+Dear Valued Customer,
+
+We have detected unauthorized access to your PayPal account. Your account will be SUSPENDED within 24 hours unless you verify your identity immediately.
+
+Click here to verify: http://paypa1-secure.xyz/login?redirect=true&user=victim
+
+You must act now to prevent permanent account closure. Enter your details including credit card number and social security number.
+
+This is your FINAL WARNING. Do not ignore this message.
+
+Best regards,
+PayPal Security Team
+
+--boundary123
+Content-Type: application/octet-stream; name="verify_account.exe"
+Content-Disposition: attachment; filename="verify_account.exe"
+
+[binary content]
+--boundary123--`;
+
+function initAnalyze() {
+  const analyzeBtn = document.getElementById('analyze-btn');
+  const clearBtn = document.getElementById('clear-input-btn');
+  const sampleBtn = document.getElementById('load-sample-btn');
+  const input = document.getElementById('email-input');
+
+  analyzeBtn?.addEventListener('click', handleAnalyze);
+  clearBtn?.addEventListener('click', () => {
+    if (input) input.value = '';
+    document.getElementById('analyze-result').innerHTML = `
+      <div class="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+        <p>Paste an email and click Analyze to see results</p>
+      </div>
+    `;
+  });
+  sampleBtn?.addEventListener('click', () => {
+    if (input) input.value = SAMPLE_EMAIL;
+  });
+}
+
+async function handleAnalyze() {
+  const input = document.getElementById('email-input');
+  const resultEl = document.getElementById('analyze-result');
+  const btn = document.getElementById('analyze-btn');
+  if (!input || !resultEl) return;
+
+  const raw = input.value.trim();
+  if (!raw) {
+    resultEl.innerHTML = '<div class="error-banner">Please paste an email to analyze.</div>';
+    return;
+  }
+
+  btn?.classList.add('btn--loading');
+  resultEl.innerHTML = `
+    <div class="skeleton-card">
+      <div class="skeleton-line skeleton-line--w40"></div>
+      <div class="skeleton-line skeleton-line--w80"></div>
+      <div class="skeleton-line skeleton-line--w60"></div>
+      <div class="skeleton-line skeleton-line--w80"></div>
+    </div>
+  `;
+
+  try {
+    const res = await fetch(`${API}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw_email: raw }),
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    // Add to stats
+    stats.scanned++;
+    if (data.verdict === 'PHISHING') stats.threats++;
+    else if (data.verdict === 'SUSPICIOUS') stats.suspicious++;
+    else stats.safe++;
+
+    scanHistory.push({
+      verdict: data.verdict,
+      score: data.score,
+      subject: raw.match(/Subject:\s*(.+)/i)?.[1] || 'Manual Analysis',
+      sender: raw.match(/From:\s*(.+)/i)?.[1] || 'Unknown',
+    });
+    saveState();
+    renderStats();
+    renderThreatChart();
+    renderRecentResults();
+
+    resultEl.innerHTML = renderVerdictCard(data);
+  } catch (err) {
+    resultEl.innerHTML = `<div class="error-banner">Error: ${esc(err.message)}</div>`;
+  } finally {
+    btn?.classList.remove('btn--loading');
+  }
+}
+
+function renderVerdictCard(data) {
+  const v = data.verdict.toLowerCase();
+  const icon = v === 'safe'
+    ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>'
+    : v === 'suspicious'
+    ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
+    : '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+
+  let enginesHtml = '';
+  if (data.engines) {
+    enginesHtml = '<div class="engine-grid">';
+    for (const [key, info] of Object.entries(data.engines)) {
+      const label = ENGINE_LABELS[key] || { name: key };
+      const score = info.score || 0;
+      const active = score > 0;
+      enginesHtml += `
+        <div class="engine-chip ${active ? 'engine-chip--active' : ''}" title="${label.name}: score ${score}">
+          <span class="engine-chip__name">${label.name}</span>
+          ${active
+            ? `<span class="engine-chip__score">+${score}</span>`
+            : '<span class="engine-chip__score engine-chip__score--ok">✓</span>'}
+        </div>
+      `;
+    }
+    enginesHtml += '</div>';
+  }
+
+  let reasonsHtml = '';
+  if (data.reasons && data.reasons.length > 0) {
+    reasonsHtml = data.reasons.map(r =>
+      `<div class="reason-item"><span class="reason-item__icon">›</span><span>${esc(String(r))}</span></div>`
+    ).join('');
+  } else {
+    reasonsHtml = '<div class="reason-item"><span class="reason-item__icon">✓</span><span>No suspicious indicators detected.</span></div>';
+  }
+
+  return `
+    <div class="verdict-card verdict-card--${v}">
+      <div class="verdict-card__header">
+        <div class="verdict-card__shield">${icon}</div>
+        <div>
+          <div class="verdict-card__verdict">${data.verdict}</div>
+          <div class="verdict-card__score-label">Risk Score: <strong>${data.score}</strong></div>
+        </div>
+      </div>
+      <div class="verdict-card__body">
+        <div class="email-card__section-label" style="margin-bottom:10px;">Engine Breakdown (${Object.keys(data.engines || {}).length} engines)</div>
+        ${enginesHtml}
+        <div class="email-card__section-label" style="margin:14px 0 8px;">Detection Details (${data.reasons?.length || 0})</div>
+        ${reasonsHtml}
+      </div>
+    </div>
+  `;
+}
+
+// ═══════════════════════════════
+// GMAIL SCANNER
+// ═══════════════════════════════
+function initGmail() {
+  document.getElementById('scan-btn')?.addEventListener('click', handleGmailScan);
+}
+
+async function handleGmailScan() {
+  const btn = document.getElementById('scan-btn');
+  const count = document.getElementById('email-count')?.value || 10;
+  const listEl = document.getElementById('gmail-list');
+  const emptyEl = document.getElementById('gmail-empty');
+
+  btn?.classList.add('btn--loading');
+  if (emptyEl) emptyEl.style.display = 'none';
+  if (listEl) {
+    listEl.innerHTML = '';
+    for (let i = 0; i < Math.min(count, 5); i++) {
+      listEl.innerHTML += `
+        <div class="skeleton-card" style="animation-delay:${i * 0.05}s">
+          <div class="skeleton-line skeleton-line--w40"></div>
+          <div class="skeleton-line skeleton-line--w80"></div>
+          <div class="skeleton-line skeleton-line--w60"></div>
+        </div>
+      `;
+    }
+  }
+
+  try {
+    const res = await fetch(`${API}/scan-gmail?max_results=${count}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    if (data.message) {
+      if (listEl) listEl.innerHTML = '';
+      if (emptyEl) {
+        emptyEl.style.display = 'flex';
+        emptyEl.querySelector('p').innerHTML = `<strong>${esc(data.message)}</strong>`;
+      }
+      return;
+    }
+
+    if (listEl) listEl.innerHTML = '';
+    updateStats(data);
+    data.forEach((email, i) => renderEmailCard(email, i, listEl));
+
+  } catch (err) {
+    if (listEl) listEl.innerHTML = `<div class="error-banner">Error: ${esc(err.message)}</div>`;
+  } finally {
+    btn?.classList.remove('btn--loading');
+  }
+}
+
+// ═══════════════════════════════
+// EMAIL CARD RENDERER
+// ═══════════════════════════════
+const ENGINE_LABELS = {
+  keywords: { name: 'Keywords' },
+  urls: { name: 'URLs' },
+  sender: { name: 'Sender' },
+  reply_to: { name: 'Reply-To' },
+  whois: { name: 'WHOIS' },
+  levenshtein: { name: 'Typosquat' },
+  entropy: { name: 'Entropy' },
+  safe_browsing: { name: 'Safe Browse' },
+  header_forensics: { name: 'SPF/DKIM' },
+  homoglyph: { name: 'Homoglyph' },
+  punycode: { name: 'Punycode' },
+  subdomain_abuse: { name: 'Subdomain' },
+  domain_mismatch: { name: 'Link Mismatch' },
+  return_path: { name: 'Return-Path' },
+  attachments: { name: 'Attachments' },
+  html_obfuscation: { name: 'HTML Tricks' },
+  form_action: { name: 'Form Action' },
+  image_only: { name: 'Image Email' },
+  phishtank: { name: 'PhishTank' },
+  ip_reputation: { name: 'IP Rep' },
+};
+
+function renderEmailCard(email, index, container) {
+  const a = email.analysis;
+  const v = a.verdict.toLowerCase();
+  const cardId = `email-${index}`;
+
+  const card = document.createElement('div');
+  card.className = `email-card email-card--${v}`;
+  card.id = cardId;
+  card.style.animationDelay = `${index * 0.04}s`;
+
+  // Engine chips
+  let enginesHtml = '<div class="engine-grid">';
+  if (a.engines) {
+    for (const [key, info] of Object.entries(a.engines)) {
+      const label = ENGINE_LABELS[key] || { name: key };
+      const score = info.score || 0;
+      const active = score > 0;
+      enginesHtml += `
+        <div class="engine-chip ${active ? 'engine-chip--active' : ''}">
+          <span class="engine-chip__name">${label.name}</span>
+          ${active
+            ? `<span class="engine-chip__score">+${score}</span>`
+            : '<span class="engine-chip__score engine-chip__score--ok">✓</span>'}
+        </div>
+      `;
+    }
+  }
+  enginesHtml += '</div>';
+
+  // Reasons
+  let reasonsHtml = '';
+  if (a.reasons && a.reasons.length > 0) {
+    reasonsHtml = a.reasons.map(r =>
+      `<div class="reason-item"><span class="reason-item__icon">›</span><span>${esc(String(r))}</span></div>`
+    ).join('');
+  } else {
+    reasonsHtml = '<div class="reason-item"><span class="reason-item__icon">✓</span><span>No suspicious indicators detected.</span></div>';
+  }
+
+  card.innerHTML = `
+    <div class="email-card__header" onclick="toggleCard('${cardId}')">
+      <div class="email-card__verdict-badge">
+        ${v === 'safe' ? '✓' : v === 'suspicious' ? '!' : '✕'}
+      </div>
+      <div class="email-card__info">
+        <div class="email-card__subject">${esc(email.subject)}</div>
+        <div class="email-card__meta">
+          <span class="email-card__sender">${esc(email.sender || '')}</span>
+          <span class="email-card__tag email-card__tag--${v}">${a.verdict}</span>
+          <span class="email-card__score">Score: ${a.score}</span>
+        </div>
+      </div>
+      <span class="email-card__chevron">▾</span>
+    </div>
+    <div class="email-card__body">
+      <div class="email-card__section-label">Engine Breakdown</div>
+      ${enginesHtml}
+      <div class="email-card__section-label" style="margin-top:14px;">Detection Details (${a.reasons?.length || 0})</div>
+      ${reasonsHtml}
+    </div>
+  `;
+
+  container?.appendChild(card);
+}
+
+function toggleCard(id) {
+  document.getElementById(id)?.classList.toggle('open');
+}
+
+// ═══════════════════════════════
+// ENGINES VIEW
+// ═══════════════════════════════
+function initEngines() {
+  loadEngines();
+
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      filterEngines(btn.dataset.filter);
+    });
+  });
+}
+
+async function loadEngines() {
+  const grid = document.getElementById('engines-grid');
+  if (!grid) return;
+
+  try {
+    const res = await fetch(`${API}/api/engines`);
+    if (!res.ok) throw new Error('Failed to load engines');
+    const engines = await res.json();
+
+    grid.innerHTML = '';
+    engines.forEach((eng, i) => {
+      const iconClass = `engine-card__icon--${eng.category}`;
+      const card = document.createElement('div');
+      card.className = 'engine-card';
+      card.dataset.category = eng.category;
+      card.style.animationDelay = `${i * 0.03}s`;
+
+      card.innerHTML = `
+        <div class="engine-card__top">
+          <div class="engine-card__icon ${iconClass}">
+            ${getEngineIcon(eng.icon)}
+          </div>
+          <div>
+            <div class="engine-card__name">${esc(eng.name)}</div>
+            <div class="engine-card__category">${esc(eng.category)}</div>
+          </div>
+        </div>
+        <div class="engine-card__desc">${esc(eng.description)}</div>
+      `;
+
+      grid.appendChild(card);
+    });
+  } catch (err) {
+    grid.innerHTML = `<div class="error-banner">Could not load engines: ${esc(err.message)}</div>`;
+  }
+}
+
+function filterEngines(category) {
+  const cards = document.querySelectorAll('.engine-card');
+  cards.forEach(card => {
+    if (category === 'all' || card.dataset.category === category) {
+      card.style.display = '';
+    } else {
+      card.style.display = 'none';
+    }
+  });
+}
+
+function getEngineIcon(iconName) {
+  const icons = {
+    search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>',
+    link: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
+    user: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+    'corner-up-left': '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>',
+    calendar: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+    type: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>',
+    activity: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
+    shield: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+    lock: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+    eye: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+    globe: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+    layers: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>',
+    'alert-triangle': '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    'corner-down-left': '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>',
+    paperclip: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>',
+    code: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
+    'log-in': '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>',
+    image: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>',
+    database: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
+    server: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>',
+  };
+  return icons[iconName] || icons.shield;
+}
+
+// ═══════════════════════════════
+// UTILS
+// ═══════════════════════════════
+function esc(str) {
+  if (typeof str !== 'string') str = String(str);
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+```
+
+- Hash-based SPA routing
+- Manual email analyzer with built-in phishing sample
+- Session-persistent stats
+- CSS-only threat distribution bar chart
+- Engine details loaded from `/api/engines`
+- Category filtering on engines view
+
+---
+
+## Dependencies Added
+
+```diff:requirements.txt
+fastapi>=0.110.1
+uvicorn>=0.29.0
+pydantic>=2.7.0
+google-api-python-client>=2.193.0
+google-auth-oauthlib>=1.3.0
+google-auth-httplib2>=0.3.0
+python-whois>=0.9.6
+python-Levenshtein>=0.27.3
+requests>=2.31.0
+===
+fastapi>=0.110.1
+uvicorn>=0.29.0
+pydantic>=2.7.0
+google-api-python-client>=2.193.0
+google-auth-oauthlib>=1.3.0
+google-auth-httplib2>=0.3.0
+python-whois>=0.9.6
+python-Levenshtein>=0.27.3
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+dnspython>=2.6.0
+```
+
+---
+
+## Verification
+
+| Test | Result |
+|------|--------|
+| `GET /api/health` | ✅ `{"status": "online", "engines": 20}` |
+| `GET /api/engines` | ✅ Returns 20 engine definitions |
+| `POST /analyze` (phishing sample) | ✅ Score: 64, Verdict: PHISHING |
+| Server startup | ✅ Running on http://127.0.0.1:8000 |
+
+### Phishing sample test triggered:
+- Keywords: 33 points (17 hits)
+- URLs: 9 points (suspicious TLD, no HTTPS, lookalike)  
+- Header forensics: 16 points (SPF fail, DKIM fail, DMARC fail, spam marked)
+- Reply-To mismatch: 3 points
+- Return-Path mismatch: 3 points
+- **Total: 64 → PHISHING verdict**

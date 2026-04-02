@@ -1,0 +1,5 @@
+{
+  "artifactType": "ARTIFACT_TYPE_WALKTHROUGH",
+  "summary": "Complete walkthrough of the phishing detection system overhaul. Covers all 20 detection engines added to the backend, the complete UI redesign from generic SaaS to cybersecurity command-center, and verification results.",
+  "updatedAt": "2026-04-02T03:08:28.910907Z"
+}
