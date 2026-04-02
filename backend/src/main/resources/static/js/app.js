@@ -3,7 +3,8 @@ const API_BASE = '/api';
 let authToken = localStorage.getItem('authToken');
 
 function isAdminRole(role) {
-    return role && String(role).toLowerCase() === 'admin';
+    if (role == null || role === '') return false;
+    return String(role).trim().toLowerCase() === 'admin';
 }
 
 // Initialize
@@ -26,11 +27,11 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Redirect based on role (Admin users go to admin portal)
         if (isAdminRole(userRole)) {
-            window.location.href = '/admin';
+            window.location.replace('/admin');
             return;
         }
-        if (userRole === 'Caregiver') {
-            window.location.href = '/caretaker';
+        if (String(userRole || '').trim() === 'Caregiver') {
+            window.location.replace('/caretaker');
             return;
         }
         // Clear any URL parameters
@@ -107,11 +108,11 @@ async function handleLogin(e) {
             // Role-based redirection
             setTimeout(() => {
                 if (isAdminRole(data.role)) {
-                    window.location.href = '/admin';
+                    window.location.replace('/admin');
                     return;
                 }
-                if (data.role === 'Caregiver') {
-                    window.location.href = '/caretaker';
+                if (String(data.role || '').trim() === 'Caregiver') {
+                    window.location.replace('/caretaker');
                     return;
                 }
                 // Clear the ?login parameter from URL
