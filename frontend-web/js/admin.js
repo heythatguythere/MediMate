@@ -134,7 +134,9 @@ async function api(path, options = {}) {
                 window.location.href = '/app';
             }
         });
-        throw new Error('Unauthorized');
+        // Do not throw here: callers already check `response.ok` and we want to avoid
+        // console/runtime exceptions surfacing during admin actions.
+        return response;
     }
 
     return response;

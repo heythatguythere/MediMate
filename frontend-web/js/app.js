@@ -400,6 +400,12 @@ function showDashboard() {
     document.getElementById('dashboard-screen').classList.add('active');
     loadDashboardData();
     initChatbot();
+
+    // Show chatbot only on the dashboard view (elderly portal).
+    const fab = document.getElementById('chatbot-fab');
+    const widget = document.getElementById('chatbot-widget');
+    if (fab) fab.style.display = 'flex';
+    if (widget) widget.style.display = 'none';
 }
 
 function switchView(viewName) {
@@ -408,6 +414,13 @@ function switchView(viewName) {
     
     event.target.classList.add('active');
     document.getElementById(`${viewName}-view`).classList.add('active');
+
+    // Chatbot visibility is strictly "dashboard only".
+    const fab = document.getElementById('chatbot-fab');
+    const widget = document.getElementById('chatbot-widget');
+    const showChatbot = viewName === 'dashboard';
+    if (fab) fab.style.display = showChatbot ? 'flex' : 'none';
+    if (widget && !showChatbot) widget.style.display = 'none';
     
     // Load data for specific views
     if (viewName === 'dashboard') loadDashboardData();
