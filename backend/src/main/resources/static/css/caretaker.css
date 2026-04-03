@@ -82,8 +82,46 @@ body.dark-mode {
 body {
     font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
     background: var(--bg);
+    background-image:
+        radial-gradient(circle at 20% 0%, rgba(59,130,246,0.18), transparent 45%),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'%3E%3Cg fill='none' stroke='%233b82f6' stroke-opacity='0.08' stroke-width='2'%3E%3Cpath d='M40 10v60'/%3E%3Cpath d='M10 40h60'/%3E%3C/g%3E%3C/svg%3E");
+    background-size: auto, 160px 160px;
+    background-repeat: no-repeat, repeat;
     color: var(--text);
     transition: all 0.3s ease;
+    position: relative;
+    overflow-x: hidden;
+}
+
+body::before,
+body::after {
+    content: '';
+    position: fixed;
+    pointer-events: none;
+    z-index: 0;
+    filter: blur(60px);
+    opacity: 0.35;
+}
+
+body::before {
+    width: 520px;
+    height: 520px;
+    top: -260px;
+    left: -260px;
+    background: radial-gradient(circle, rgba(59, 130, 246, 0.45) 0%, rgba(59, 130, 246, 0) 62%);
+}
+
+body::after {
+    width: 520px;
+    height: 520px;
+    bottom: -270px;
+    right: -270px;
+    background: radial-gradient(circle, rgba(16, 185, 129, 0.42) 0%, rgba(16, 185, 129, 0) 62%);
+}
+
+body.dark-mode::before,
+body.dark-mode::after {
+    opacity: 0.22;
 }
 
 /* Top Navbar */
@@ -227,6 +265,8 @@ body {
     display: grid;
     grid-template-columns: 250px 1fr;
     min-height: calc(100vh - 76px);
+    position: relative;
+    z-index: 1;
 }
 
 /* Sidebar */

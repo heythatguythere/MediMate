@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MediMate - Patient Dashboard</title>
+    <title>MediML - Patient Dashboard</title>
     <link rel="stylesheet" href="css/dashboard.css?v=20251029-1">
 </head>
 <body>
@@ -11,7 +11,7 @@
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="logo">
-                <h2>🏥 MediMate</h2>
+                <h2>🏥 MediML</h2>
                 <div style="position:relative; display:inline-block; margin-left:auto;">
                     <button onclick="toggleNotifications()" style="background:none; border:none; font-size:24px; cursor:pointer; position:relative;">
                         🔔
@@ -54,6 +54,37 @@
                     <button class="btn-refresh" onclick="refreshDashboard()">🔄 Refresh</button>
                 </div>
             </header>
+
+            <!-- Chatbot Floating Button -->
+            <button id="chatbot-fab" class="chatbot-fab" onclick="toggleChatbot()" aria-label="Open caregiver voice chatbot" title="Voice Chat">
+                <span class="chatbot-fab-icon" aria-hidden="true">💬</span>
+            </button>
+
+            <!-- Chatbot Widget -->
+            <div id="chatbot-widget" class="chatbot-widget" style="display:none;">
+                <div class="chatbot-header">
+                    <div class="chatbot-header-left">
+                        <span class="chatbot-badge" aria-hidden="true">Voice</span>
+                        <span class="chatbot-title">Chat with your caregiver</span>
+                    </div>
+                    <button type="button" class="chatbot-close" onclick="toggleChatbot()" aria-label="Close">✕</button>
+                </div>
+
+                <div id="chatbot-messages" class="chatbot-messages"></div>
+
+                <div class="chatbot-composer">
+                    <textarea id="chatbot-text-input" placeholder="Press the mic and speak, or type here..."></textarea>
+                    <div class="chatbot-actions">
+                        <button type="button" id="chatbot-mic-btn" class="chatbot-btn" onclick="startVoiceInput()">
+                            🎤 Speak
+                        </button>
+                        <button type="button" class="chatbot-btn chatbot-btn-primary" onclick="sendChatToCaregiver()">
+                            Send to Caregiver
+                        </button>
+                    </div>
+                    <div id="chatbot-status" class="chatbot-status" aria-live="polite"></div>
+                </div>
+            </div>
 
             <!-- Overview Section -->
             <section id="overview-section" class="content-section active">

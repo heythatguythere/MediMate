@@ -7,6 +7,8 @@ let allPatients = [];
 let allAppointments = [];
 let allTasks = [];
 let allNotifications = [];
+let lastUnreadCount = 0;
+let notificationsInitialized = false;
 
 // ========== CARETAKER AI INSIGHTS ==========
 async function refreshInsights() {
@@ -146,6 +148,8 @@ document.addEventListener('DOMContentLoaded', () => {
     loadAppointments();
     loadTasks();
     loadNotifications();
+    // Poll occasionally so caregiver sees new voice messages without refresh.
+    setInterval(loadNotifications, 10000);
     initConfirmModal();
 
     // Patient quick search
@@ -999,6 +1003,21 @@ async function loadNotifications() {
         if (res.ok) {
             allNotifications = await res.json();
             updateNotifBadge();
+
+            const unread = allNotifications.filter(n => !n.read);
+            if (!notificationsInitialized) {
+                lastUnreadCount = unread.length;
+                notificationsInitialized = true;
+                return;
+            }
+            if (unread.length > lastUnreadCount) {
+                const latest = unread[0];
+                toast(
+                    `${latest.icon || '🔔'} ${latest.title || 'New alert'}: ${latest.message || ''}`,
+                    'info'
+                );
+            }
+            lastUnreadCount = unread.length;
         }
     } catch (e) { console.error('Error loading notifications', e); }
 }

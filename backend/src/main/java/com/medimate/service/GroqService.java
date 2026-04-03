@@ -56,6 +56,50 @@ public class GroqService {
         return body;
     }
 
+    /**
+     * Translate arbitrary text for caregiver consumption.
+     * IMPORTANT: Returns only the translated text (no extra commentary).
+     */
+    public String translateMessage(String text, String targetLanguage) throws Exception {
+        if (groqApiKey == null || groqApiKey.isBlank()) {
+            throw new IllegalStateException("GROQ_API_KEY not configured");
+        }
+        String lang = (targetLanguage == null || targetLanguage.isBlank()) ? "English" : targetLanguage.trim();
+
+        // Force model to output ONLY translation text to avoid parsing issues.
+        String payload = "{" +
+                "\"model\":\"" + model + "\"," +
+                "\"messages\":[{" +
+                "\"role\":\"system\",\"content\":\"You are a translation engine. Translate the user's text into " + escape(lang) + ". Output ONLY the translated text, with no quotes, no headings, no extra sentences.\"},{" +
+                "\"role\":\"user\",\"content\":\"" + escape(text) + "\"}]}";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(GROQ_URL))
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + groqApiKey)
+                .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .build();
+
+        HttpClient client = HttpClient.newBuilder().build();
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() / 100 != 2) {
+            throw new RuntimeException("Groq API error: " + response.statusCode() + " - " + response.body());
+        }
+
+        // naive extraction; keep consistent with generateInsights()
+        String body = response.body();
+        String marker = "\"content\":";
+        int idx = body.indexOf(marker);
+        if (idx > 0) {
+            int start = body.indexOf('"', idx + marker.length());
+            int end = body.indexOf('"', start + 1);
+            if (start > 0 && end > start) {
+                return unescape(body.substring(start + 1, end)).trim();
+            }
+        }
+        return body;
+    }
+
     private String escape(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ");
     }

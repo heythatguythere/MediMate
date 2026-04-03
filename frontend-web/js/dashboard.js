@@ -89,6 +89,7 @@ async function loadEmergency() {
 }
     
     document.getElementById('user-name').textContent = userName;
+    initChatbot();
     loadDashboard();
 });
 
@@ -110,6 +111,163 @@ async function loadDashboard() {
     setInterval(() => {
         loadNotifications();
     }, 10000);
+}
+
+// ========== CHATBOT (ELDERLY -> CAREGIVER VOICE TRANSLATION) ==========
+let chatbotRecognition = null;
+
+function toggleChatbot() {
+    const widget = document.getElementById('chatbot-widget');
+    if (!widget) return;
+    const isOpen = widget.style.display === 'flex';
+    widget.style.display = isOpen ? 'none' : 'flex';
+}
+
+function setChatbotStatus(text) {
+    const el = document.getElementById('chatbot-status');
+    if (el) el.textContent = text || '';
+}
+
+function appendChatBubble({ text, from }) {
+    const container = document.getElementById('chatbot-messages');
+    if (!container) return;
+
+    const bubble = document.createElement('div');
+    bubble.className = `chat-bubble ${from === 'me' ? 'me' : 'caregiver'}`;
+    bubble.textContent = text;
+    container.appendChild(bubble);
+
+    // Keep latest messages in view.
+    container.scrollTop = container.scrollHeight;
+}
+
+function initChatbot() {
+    const micBtn = document.getElementById('chatbot-mic-btn');
+    const textInput = document.getElementById('chatbot-text-input');
+    if (micBtn && textInput) {
+        textInput.addEventListener('keydown', (e) => {
+            // Enter to send (Shift+Enter for new line).
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendChatToCaregiver();
+            }
+        });
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        setChatbotStatus('Voice input is not supported in this browser.');
+        return;
+    }
+
+    chatbotRecognition = new SpeechRecognition();
+    chatbotRecognition.lang = 'en-US';
+    chatbotRecognition.interimResults = true;
+    chatbotRecognition.continuous = false;
+
+    chatbotRecognition.onstart = () => {
+        setChatbotStatus('Listening... speak clearly.');
+        if (micBtn) micBtn.disabled = true;
+    };
+
+    chatbotRecognition.onerror = (event) => {
+        console.error('SpeechRecognition error:', event);
+        setChatbotStatus('Voice input failed. Try again.');
+        if (micBtn) micBtn.disabled = false;
+    };
+
+    chatbotRecognition.onend = () => {
+        if (micBtn) micBtn.disabled = false;
+    };
+
+    chatbotRecognition.onresult = async (event) => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+            transcript += event.results[i][0].transcript;
+        }
+
+        const textInputEl = document.getElementById('chatbot-text-input');
+        if (textInputEl) textInputEl.value = transcript.trim();
+
+        // Send only when we have a final result to avoid spamming the backend.
+        const last = event.results[event.results.length - 1];
+        const isFinal = last && last.isFinal;
+        if (!isFinal) return;
+
+        const finalText = transcript.trim();
+        if (!finalText) return;
+
+        appendChatBubble({ text: finalText, from: 'me' });
+        await sendChatToCaregiver(finalText);
+    };
+}
+
+function startVoiceInput() {
+    if (!chatbotRecognition) {
+        setChatbotStatus('Voice input is not supported. Use typing instead.');
+        return;
+    }
+    try {
+        chatbotRecognition.start();
+    } catch (e) {
+        // SpeechRecognition.start() can throw if called twice quickly.
+        console.error('startVoiceInput:', e);
+        setChatbotStatus('Voice input is busy. Try again in a moment.');
+    }
+}
+
+async function sendChatToCaregiver(forceText = null) {
+    const textInputEl = document.getElementById('chatbot-text-input');
+    const statusEl = document.getElementById('chatbot-status');
+    const sendBtn = document.querySelector('.chatbot-btn-primary');
+    if (!textInputEl) return;
+
+    const text = (forceText != null ? forceText : textInputEl.value).trim();
+    if (!text) {
+        if (statusEl) statusEl.textContent = 'Type something or press the mic.';
+        return;
+    }
+
+    setChatbotStatus('Sending to caregiver...');
+    if (sendBtn) sendBtn.disabled = true;
+
+    try {
+        const res = await fetch(`${API_BASE}/elderly/chat/translate-to-caregiver`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Auth-Token': authToken
+            },
+            body: JSON.stringify({ text, targetLanguage: 'English' })
+        });
+
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            setChatbotStatus(data.error || 'Failed to send. Please try again.');
+            if (sendBtn) sendBtn.disabled = false;
+            return;
+        }
+
+        const data = await res.json();
+        const translated = data.translated || '';
+
+        // Prevent double-adding the "me" bubble when voice triggers it.
+        if (!forceText) appendChatBubble({ text, from: 'me' });
+
+        appendChatBubble({
+            text: translated ? `Translated: ${translated}` : 'Sent to caregiver.',
+            from: 'caregiver'
+        });
+
+        // Clear composer for the next message.
+        textInputEl.value = '';
+        setChatbotStatus('Sent!');
+    } catch (e) {
+        console.error('sendChatToCaregiver error:', e);
+        setChatbotStatus('Network error. Please try again.');
+    } finally {
+        if (sendBtn) sendBtn.disabled = false;
+    }
 }
 
 async function refreshDashboard() {
@@ -159,7 +317,7 @@ function renderMoodChart(trends) {
     const ctx = canvas.getContext('2d');
     
     canvas.width = canvas.offsetWidth;
-    canvas.height = 250;
+    canvas.height = 210;
     
     const days = Object.keys(trends);
     const values = Object.values(trends);

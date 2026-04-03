@@ -122,9 +122,18 @@ async function api(path, options = {}) {
     });
 
     if (response.status === 401 || response.status === 403) {
-        alert('Your session has expired or access is denied. Please login again.');
-        localStorage.removeItem('authToken');
-        window.location.href = '/app';
+        openAdminModal({
+            title: 'Session expired',
+            bodyHtml: '<p>Your session has expired or access is denied. Please login again.</p>',
+            confirmText: 'Go to login',
+            showCancel: false,
+            confirmFn: () => {
+                closeAdminModal();
+                localStorage.removeItem('authToken');
+                localStorage.removeItem('userRole');
+                window.location.href = '/app';
+            }
+        });
         throw new Error('Unauthorized');
     }
 
@@ -137,8 +146,16 @@ async function ensureAdmin() {
         if (!res.ok) return false;
         const me = await res.json();
         if (!me.role || String(me.role).toLowerCase() !== 'admin') {
-            alert('Admin access is required.');
-            window.location.href = '/app';
+            openAdminModal({
+                title: 'Admin access required',
+                bodyHtml: '<p>This page is for Admin users only.</p>',
+                confirmText: 'Go back',
+                showCancel: false,
+                confirmFn: () => {
+                    closeAdminModal();
+                    window.location.href = '/app';
+                }
+            });
             return false;
         }
         return true;
@@ -830,7 +847,68 @@ function viewCaretaker(id) {
 }
 
 function addMedication() {
-    window.open('/caretaker', '_blank');
+    const bodyHtml = `
+        <label>Patient email
+            <input id="modal-med-add-email" placeholder="patient@example.com" />
+        </label>
+        <label>Medication name
+            <input id="modal-med-add-name" placeholder="e.g., Metformin" />
+        </label>
+        <label>Dosage
+            <input id="modal-med-add-dosage" placeholder="e.g., 500mg" />
+        </label>
+        <label>Schedule (HH:mm, comma-separated)
+            <input id="modal-med-add-schedule" placeholder="e.g., 08:00,20:00" />
+        </label>
+        <p style="color:var(--text-secondary); font-size:12px; margin-top:10px;">
+            This creates the medication as Active (default). Set active/inactive in the table after creation.
+        </p>
+    `;
+
+    openAdminModal({
+        title: 'Add new medication',
+        bodyHtml,
+        confirmText: 'Create medication',
+        showCancel: true,
+        confirmFn: async () => {
+            const patientEmail = document.getElementById('modal-med-add-email')?.value?.trim();
+            const name = document.getElementById('modal-med-add-name')?.value?.trim();
+            const dosage = document.getElementById('modal-med-add-dosage')?.value?.trim();
+            const schedule = document.getElementById('modal-med-add-schedule')?.value?.trim();
+
+            if (!patientEmail || !name || !dosage || !schedule) {
+                openAdminModal({
+                    title: 'Missing fields',
+                    bodyHtml: '<p>Please fill Patient email, Medication name, Dosage, and Schedule.</p>',
+                    confirmText: 'Close',
+                    showCancel: false,
+                    confirmFn: closeAdminModal
+                });
+                return;
+            }
+
+            const response = await api('/caretaker/medications/assign', {
+                method: 'POST',
+                body: JSON.stringify({ patientEmail, name, dosage, schedule })
+            });
+
+            if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
+                openAdminModal({
+                    title: 'Create failed',
+                    bodyHtml: `<p>${escapeHtml(data.error || 'Failed to create medication.')}</p>`,
+                    confirmText: 'Close',
+                    showCancel: false,
+                    confirmFn: closeAdminModal
+                });
+                return;
+            }
+
+            closeAdminModal();
+            await loadMedications();
+            await loadDashboardStats();
+        }
+    });
 }
 
 async function editMedication(id) {

@@ -1,6 +1,6 @@
-## MediMate Web Frontend
+## MediML Web Frontend
 
-This folder contains the web UI assets for MediMate:
+This folder contains the web UI assets for MediML:
 
 - HTML pages at the root
 - CSS in `css/`
