@@ -25,6 +25,20 @@ function scheduleChatAutoSend() {
     }, CHAT_AUTO_SEND_MS);
 }
 
+function setElderlyChatbotVisible(visible) {
+    const root = document.getElementById('elderly-chatbot-root');
+    const overlay = document.getElementById('chatbot-overlay');
+    if (root) {
+        root.classList.toggle('elderly-chatbot-root--hidden', !visible);
+        root.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    }
+    if (!visible && overlay) {
+        overlay.classList.remove('is-open');
+        overlay.setAttribute('aria-hidden', 'true');
+        document.body.style.overflow = '';
+    }
+}
+
 function toggleChatbot() {
     const overlay = document.getElementById('chatbot-overlay');
     const widget = document.getElementById('chatbot-widget');
@@ -439,11 +453,7 @@ function logout() {
     }
     
     document.body.style.overflow = '';
-    const chatOverlay = document.getElementById('chatbot-overlay');
-    if (chatOverlay) {
-        chatOverlay.classList.remove('is-open');
-        chatOverlay.setAttribute('aria-hidden', 'true');
-    }
+    setElderlyChatbotVisible(false);
 
     document.getElementById('dashboard-screen').classList.remove('active');
     document.getElementById('auth-screen').classList.add('active');
@@ -456,14 +466,8 @@ function showDashboard() {
     loadDashboardData();
     initChatbot();
 
-    // Show chatbot only on the dashboard view (elderly portal).
-    const fab = document.getElementById('chatbot-fab');
-    const overlay = document.getElementById('chatbot-overlay');
-    if (fab) fab.style.display = 'flex';
-    if (overlay) {
-        overlay.classList.remove('is-open');
-        overlay.setAttribute('aria-hidden', 'true');
-    }
+    // Caregiver chat pill: dashboard view only (elderly portal).
+    setElderlyChatbotVisible(true);
     document.body.style.overflow = '';
 }
 
@@ -474,16 +478,9 @@ function switchView(viewName) {
     event.target.classList.add('active');
     document.getElementById(`${viewName}-view`).classList.add('active');
 
-    // Chatbot visibility is strictly "dashboard only".
-    const fab = document.getElementById('chatbot-fab');
-    const overlay = document.getElementById('chatbot-overlay');
+    // Caregiver chat pill: strictly dashboard view only.
     const showChatbot = viewName === 'dashboard';
-    if (fab) fab.style.display = showChatbot ? 'flex' : 'none';
-    if (overlay && !showChatbot) {
-        overlay.classList.remove('is-open');
-        overlay.setAttribute('aria-hidden', 'true');
-        document.body.style.overflow = '';
-    }
+    setElderlyChatbotVisible(showChatbot);
     
     // Load data for specific views
     if (viewName === 'dashboard') loadDashboardData();

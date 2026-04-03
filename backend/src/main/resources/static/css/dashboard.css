@@ -4,33 +4,36 @@
     box-sizing: border-box;
 }
 
-body {
+:root {
+    --portal-bg-image: url('https://images.unsplash.com/photo-1579684385127-1ef15d508118?auto=format&fit=crop&w=1920&q=80');
+}
+
+body.portal-dashboard-page {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    background: #050b17;
+    min-height: 100vh;
+    background-color: #0b1220;
     background-image:
-        linear-gradient(135deg, rgba(2, 6, 23, 0.82) 0%, rgba(15, 23, 42, 0.65) 100%),
-        radial-gradient(circle at 15% 10%, rgba(59, 130, 246, 0.24), transparent 40%),
-        radial-gradient(circle at 86% 20%, rgba(16, 185, 129, 0.18), transparent 48%),
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='none' stroke='%233b82f6' stroke-opacity='0.08' stroke-width='2'%3E%3Cpath d='M60 15v90'/%3E%3Cpath d='M15 60h90'/%3E%3Cpath d='M28 28l64 64'/%3E%3Cpath d='M92 28l-64 64'/%3E%3Crect x='34' y='56' width='52' height='8' rx='4'/%3E%3C/g%3E%3C/svg%3E"),
-        url('/images/medical-bg.svg');
-    background-size: cover, auto, auto, 160px 160px, cover;
-    background-repeat: no-repeat, no-repeat, no-repeat, repeat, no-repeat;
+        linear-gradient(180deg, rgba(15, 23, 42, 0.9) 0%, rgba(15, 23, 42, 0.75) 45%, rgba(15, 23, 42, 0.92) 100%),
+        var(--portal-bg-image);
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
     color: #e5e7eb;
     position: relative;
     overflow-x: hidden;
 }
 
-body::before,
-body::after {
+body.portal-dashboard-page::before,
+body.portal-dashboard-page::after {
     content: '';
     position: fixed;
     pointer-events: none;
     z-index: 0;
     filter: blur(60px);
-    opacity: 0.24;
+    opacity: 0.2;
 }
 
-body::before {
+body.portal-dashboard-page::before {
     width: 520px;
     height: 520px;
     top: -260px;
@@ -38,7 +41,7 @@ body::before {
     background: radial-gradient(circle, rgba(16, 185, 129, 0.36) 0%, rgba(16, 185, 129, 0) 62%);
 }
 
-body::after {
+body.portal-dashboard-page::after {
     width: 520px;
     height: 520px;
     bottom: -270px;
@@ -512,10 +515,22 @@ body::after {
 }
 
 /* Chatbot (Elderly Voice -> Caregiver Translation) */
+.elderly-chatbot-root {
+    pointer-events: none;
+}
+
+.elderly-chatbot-root > * {
+    pointer-events: auto;
+}
+
+.elderly-chatbot-root--hidden {
+    display: none !important;
+}
+
 .chatbot-overlay {
     position: fixed;
     inset: 0;
-    z-index: 2100;
+    z-index: 10100;
     display: none;
     align-items: center;
     justify-content: center;
@@ -536,20 +551,24 @@ body::after {
 
 .chatbot-fab {
     position: fixed;
-    right: 18px;
-    bottom: 18px;
-    width: 72px;
-    height: 72px;
-    border-radius: 26px;
-    border: 1px solid rgba(59, 130, 246, 0.35);
-    background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+    left: auto !important;
+    right: max(18px, env(safe-area-inset-right)) !important;
+    bottom: max(18px, env(safe-area-inset-bottom)) !important;
+    top: auto !important;
+    width: 64px;
+    height: 64px;
+    border-radius: 999px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    background: linear-gradient(145deg, #2563eb 0%, #7c3aed 55%, #6366f1 100%);
     color: white;
     cursor: pointer;
-    box-shadow: 0 18px 40px rgba(37, 99, 235, 0.25);
+    box-shadow:
+        0 4px 0 rgba(0, 0, 0, 0.12),
+        0 20px 50px rgba(37, 99, 235, 0.45);
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 2200;
+    z-index: 10050;
     transition: transform 0.18s ease, box-shadow 0.18s ease;
     animation: chatbot-fab-glow 4s ease-in-out infinite;
 }
@@ -560,10 +579,15 @@ body::after {
 }
 
 .chatbot-fab-svg {
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     color: #fff;
-    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.2));
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
+}
+
+.chatbot-fab-pill {
+    width: 36px;
+    height: 36px;
 }
 
 @keyframes chatbot-fab-glow {

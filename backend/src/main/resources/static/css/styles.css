@@ -15,6 +15,9 @@
     --text: #0f172a;
     --text-secondary: #64748b;
     --border: #e2e8f0;
+    /* Remote hero backgrounds (Unsplash — hotlink allowed for dev/demo) */
+    --auth-bg-image: url('https://images.unsplash.com/photo-1576091160399-112ba8d25d1d?auto=format&fit=crop&w=1920&q=80');
+    --portal-bg-image: url('https://images.unsplash.com/photo-1579684385127-1ef15d508118?auto=format&fit=crop&w=1920&q=80');
 }
 
 body.dark-mode {
@@ -27,17 +30,9 @@ body.dark-mode {
 
 body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    background: var(--bg);
-    background-image:
-        linear-gradient(135deg, rgba(2, 6, 23, 0.78) 0%, rgba(15, 23, 42, 0.62) 100%),
-        radial-gradient(circle at 10% 10%, rgba(59, 130, 246, 0.20), transparent 45%),
-        radial-gradient(circle at 86% 18%, rgba(16, 185, 129, 0.16), transparent 52%),
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='none' stroke='%233b82f6' stroke-opacity='0.08' stroke-width='2'%3E%3Cpath d='M60 15v90'/%3E%3Cpath d='M15 60h90'/%3E%3Cpath d='M28 28l64 64'/%3E%3Cpath d='M92 28l-64 64'/%3E%3Crect x='34' y='56' width='52' height='8' rx='4'/%3E%3C/g%3E%3C/svg%3E"),
-        url('/images/medical-bg.svg');
-    background-size: cover, auto, auto, 180px 180px, cover;
-    background-repeat: no-repeat, no-repeat, no-repeat, repeat, no-repeat;
+    background: #0f172a;
     color: var(--text);
-    transition: all 0.3s ease;
+    transition: color 0.3s ease, background 0.3s ease;
     position: relative;
     overflow-x: hidden;
 }
@@ -71,11 +66,24 @@ body::after {
 body.dark-mode::before { opacity: 0.18; }
 body.dark-mode::after { opacity: 0.18; }
 
+/* Elderly caregiver chat — only mounted on dashboard; visibility toggled in JS */
+.elderly-chatbot-root {
+    pointer-events: none;
+}
+
+.elderly-chatbot-root > * {
+    pointer-events: auto;
+}
+
+.elderly-chatbot-root--hidden {
+    display: none !important;
+}
+
 /* Chatbot (Elderly Voice -> Caregiver Translation) */
 .chatbot-overlay {
     position: fixed;
     inset: 0;
-    z-index: 2100;
+    z-index: 10100;
     display: none;
     align-items: center;
     justify-content: center;
@@ -96,18 +104,22 @@ body.dark-mode::after { opacity: 0.18; }
 
 .chatbot-fab {
     position: fixed;
-    right: 18px;
-    bottom: 18px;
-    width: 72px;
-    height: 72px;
-    border-radius: 26px;
-    border: 1px solid rgba(59, 130, 246, 0.35);
-    background: linear-gradient(135deg, rgba(37, 99, 235, 1) 0%, rgba(124, 58, 237, 1) 100%);
-    box-shadow: 0 22px 55px rgba(37, 99, 235, 0.28);
+    left: auto !important;
+    right: max(18px, env(safe-area-inset-right)) !important;
+    bottom: max(18px, env(safe-area-inset-bottom)) !important;
+    top: auto !important;
+    width: 64px;
+    height: 64px;
+    border-radius: 999px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    background: linear-gradient(145deg, #2563eb 0%, #7c3aed 55%, #6366f1 100%);
+    box-shadow:
+        0 4px 0 rgba(0, 0, 0, 0.12),
+        0 20px 50px rgba(37, 99, 235, 0.45);
     color: white;
     cursor: pointer;
-    z-index: 2200;
-    display: none; /* JS will enable only on dashboard */
+    z-index: 10050;
+    display: flex;
     align-items: center;
     justify-content: center;
     transition: transform 0.18s ease, box-shadow 0.18s ease;
@@ -120,10 +132,15 @@ body.dark-mode::after { opacity: 0.18; }
 }
 
 .chatbot-fab-svg {
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     color: #fff;
-    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.2));
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
+}
+
+.chatbot-fab-pill {
+    width: 36px;
+    height: 36px;
 }
 
 @keyframes chatbot-fab-glow {
@@ -447,6 +464,87 @@ body.dark-mode .chatbot-status {
     color: #94a3b8;
 }
 
+/* Elderly portal: glass panels over photo background */
+.portal-screen--elderly .top-nav {
+    background: rgba(15, 23, 42, 0.78);
+    backdrop-filter: blur(14px) saturate(1.1);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+}
+
+.portal-screen--elderly .nav-left h2 {
+    background: linear-gradient(135deg, #e0f2fe 0%, #93c5fd 50%, #60a5fa 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.portal-screen--elderly .sidebar {
+    background: rgba(15, 23, 42, 0.65);
+    backdrop-filter: blur(12px);
+    border-right: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.portal-screen--elderly .nav-item {
+    color: rgba(248, 250, 252, 0.82);
+}
+
+.portal-screen--elderly .nav-item:hover {
+    background: rgba(59, 130, 246, 0.15);
+    color: #f8fafc;
+}
+
+.portal-screen--elderly .nav-item.active {
+    background: rgba(59, 130, 246, 0.28);
+    color: #f8fafc;
+}
+
+.portal-screen--elderly .main-content h1 {
+    color: #f8fafc;
+    text-shadow: 0 2px 16px rgba(0, 0, 0, 0.35);
+}
+
+.portal-screen--elderly .card {
+    background: rgba(30, 41, 59, 0.72);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+}
+
+.portal-screen--elderly .card h3 {
+    color: #e2e8f0;
+}
+
+.portal-screen--elderly .stat-card {
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #e2e8f0;
+}
+
+.portal-screen--elderly .stat-card h4 {
+    color: #94a3b8;
+}
+
+.portal-screen--elderly .stat-card .value {
+    color: #93c5fd;
+}
+
+.portal-screen--elderly .search-bar {
+    background: rgba(15, 23, 42, 0.5);
+    border-color: rgba(255, 255, 255, 0.12);
+    color: #f1f5f9;
+}
+
+.portal-screen--elderly .main-content {
+    position: relative;
+    z-index: 1;
+}
+
+.portal-screen--elderly .theme-toggle {
+    background: rgba(255, 255, 255, 0.1);
+    color: #f8fafc;
+}
+
 @keyframes pulse {
     0%, 100% { transform: scale(1); opacity: 0.1; }
     50% { transform: scale(1.05); opacity: 0.15; }
@@ -458,6 +556,31 @@ body.dark-mode .chatbot-status {
 
 .screen.active {
     display: block;
+}
+
+/* Full-screen backgrounds (remote images) */
+#auth-screen.auth-screen {
+    min-height: 100vh;
+    position: relative;
+    background-color: #0c1222;
+    background-image:
+        linear-gradient(165deg, rgba(15, 23, 42, 0.88) 0%, rgba(30, 64, 175, 0.55) 45%, rgba(15, 23, 42, 0.92) 100%),
+        var(--auth-bg-image);
+    background-size: cover;
+    background-position: center;
+    background-attachment: scroll;
+}
+
+#dashboard-screen.portal-screen--elderly {
+    min-height: 100vh;
+    position: relative;
+    background-color: #0b1220;
+    background-image:
+        linear-gradient(180deg, rgba(15, 23, 42, 0.88) 0%, rgba(15, 23, 42, 0.78) 40%, rgba(15, 23, 42, 0.92) 100%),
+        var(--portal-bg-image);
+    background-size: cover;
+    background-position: center;
+    background-attachment: scroll;
 }
 
 /* Auth Screen */
@@ -478,13 +601,13 @@ body.dark-mode .chatbot-status {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    width: 600px;
-    height: 600px;
-    background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 50%, #2563eb 100%);
+    width: min(90vw, 520px);
+    height: min(90vw, 520px);
+    background: radial-gradient(circle, rgba(59, 130, 246, 0.25) 0%, transparent 65%);
     border-radius: 50%;
-    opacity: 0.1;
-    filter: blur(80px);
-    animation: pulse 4s ease-in-out infinite;
+    filter: blur(40px);
+    animation: pulse 5s ease-in-out infinite;
+    pointer-events: none;
 }
 
 .back-to-home {
@@ -510,34 +633,43 @@ body.dark-mode .chatbot-status {
 }
 
 .auth-card {
-    background: rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(20px);
-    border-radius: 24px;
-    padding: 48px;
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(18px) saturate(1.2);
+    border-radius: 28px;
+    padding: 44px 40px 48px;
     width: 100%;
-    max-width: 480px;
-    box-shadow: 
-        0 20px 60px rgba(0,0,0,0.1),
-        0 0 100px rgba(59, 130, 246, 0.1);
-    border: 1px solid rgba(255, 255, 255, 0.8);
+    max-width: 440px;
+    box-shadow:
+        0 25px 80px rgba(0, 0, 0, 0.35),
+        0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+    border: 1px solid rgba(255, 255, 255, 0.65);
     position: relative;
     z-index: 10;
 }
 
 .auth-header {
     text-align: center;
-    margin-bottom: 32px;
+    margin-bottom: 28px;
+}
+
+.auth-brand-mark {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 14px;
+}
+
+.auth-pill-logo {
+    width: 56px;
+    height: 56px;
+    filter: drop-shadow(0 8px 20px rgba(37, 99, 235, 0.35));
 }
 
 .auth-header h1 {
-    font-size: 40px;
+    font-size: 2rem;
     font-weight: 900;
-    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    color: #0f172a;
     margin-bottom: 8px;
-    letter-spacing: -1px;
+    letter-spacing: -0.04em;
 }
 
 .auth-header p {
@@ -691,7 +823,7 @@ body.dark-mode .chatbot-status {
 
 .dashboard-container {
     display: grid;
-    grid-template-columns: 250px 1fr 300px;
+    grid-template-columns: minmax(200px, 250px) 1fr;
     min-height: calc(100vh - 70px);
     position: relative;
     z-index: 1;

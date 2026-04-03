@@ -90,6 +90,7 @@ async function loadEmergency() {
     
     document.getElementById('user-name').textContent = userName;
     initChatbot();
+    setElderlyChatbotVisible(true);
     loadDashboard();
 });
 
@@ -134,6 +135,20 @@ function scheduleChatAutoSend() {
         const el = document.getElementById('chatbot-text-input');
         if (el && el.value.trim()) sendChatToCaregiver(null, { autoSend: true });
     }, CHAT_AUTO_SEND_MS);
+}
+
+function setElderlyChatbotVisible(visible) {
+    const root = document.getElementById('elderly-chatbot-root');
+    const overlay = document.getElementById('chatbot-overlay');
+    if (root) {
+        root.classList.toggle('elderly-chatbot-root--hidden', !visible);
+        root.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    }
+    if (!visible && overlay) {
+        overlay.classList.remove('is-open');
+        overlay.setAttribute('aria-hidden', 'true');
+        document.body.style.overflow = '';
+    }
 }
 
 function toggleChatbot() {
@@ -967,6 +982,10 @@ function showSection(sectionName) {
     
     // Add active class to clicked nav item
     event.target.closest('.nav-item').classList.add('active');
+
+    // Caregiver chat pill: overview (home) only
+    const showChatbot = sectionName === 'overview';
+    setElderlyChatbotVisible(showChatbot);
 }
 
 function logout() {

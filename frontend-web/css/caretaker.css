@@ -68,6 +68,7 @@
     --text-secondary: #64748b;
     --border: #e2e8f0;
     --shadow: 0 4px 16px rgba(0,0,0,0.06);
+    --portal-bg-image: url('https://images.unsplash.com/photo-1579684385127-1ef15d508118?auto=format&fit=crop&w=1920&q=80');
 }
 
 body.dark-mode {
@@ -81,17 +82,15 @@ body.dark-mode {
 
 body {
     font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
-    background: var(--bg);
+    background-color: #0f172a;
     background-image:
-        linear-gradient(135deg, rgba(2, 6, 23, 0.78) 0%, rgba(15, 23, 42, 0.62) 100%),
-        radial-gradient(circle at 20% 0%, rgba(59, 130, 246, 0.20), transparent 45%),
-        radial-gradient(circle at 85% 18%, rgba(16, 185, 129, 0.16), transparent 52%),
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='none' stroke='%233b82f6' stroke-opacity='0.08' stroke-width='2'%3E%3Cpath d='M60 15v90'/%3E%3Cpath d='M15 60h90'/%3E%3Cpath d='M28 28l64 64'/%3E%3Cpath d='M92 28l-64 64'/%3E%3Crect x='34' y='56' width='52' height='8' rx='4'/%3E%3C/g%3E%3C/svg%3E"),
-        url('/images/medical-bg.svg');
-    background-size: cover, auto, auto, 160px 160px, cover;
-    background-repeat: no-repeat, no-repeat, no-repeat, repeat, no-repeat;
+        linear-gradient(180deg, rgba(15, 23, 42, 0.9) 0%, rgba(15, 23, 42, 0.78) 50%, rgba(15, 23, 42, 0.92) 100%),
+        var(--portal-bg-image);
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
     color: var(--text);
-    transition: all 0.3s ease;
+    transition: color 0.3s ease, background 0.3s ease;
     position: relative;
     overflow-x: hidden;
 }
