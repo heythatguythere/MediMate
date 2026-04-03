@@ -271,6 +271,36 @@
                         <button onclick="toggleTheme()" class="btn-secondary">Toggle Dark Mode</button>
                     </div>
                 </div>
+
+                <!-- Elderly Voice Chatbot -->
+                <button id="chatbot-fab" class="chatbot-fab" onclick="toggleChatbot()" aria-label="Open caregiver voice chatbot" title="Voice Chat">
+                    <span class="chatbot-fab-icon" aria-hidden="true">💬</span>
+                </button>
+
+                <div id="chatbot-widget" class="chatbot-widget" style="display:none;">
+                    <div class="chatbot-header">
+                        <div class="chatbot-header-left">
+                            <span class="chatbot-badge" aria-hidden="true">Voice</span>
+                            <span class="chatbot-title">Chat with your caregiver</span>
+                        </div>
+                        <button type="button" class="chatbot-close" onclick="toggleChatbot()" aria-label="Close">✕</button>
+                    </div>
+
+                    <div id="chatbot-messages" class="chatbot-messages"></div>
+
+                    <div class="chatbot-composer">
+                        <textarea id="chatbot-text-input" placeholder="Press the mic and speak, or type here..."></textarea>
+                        <div class="chatbot-actions">
+                            <button type="button" id="chatbot-mic-btn" class="chatbot-btn" onclick="startVoiceInput()">
+                                🎤 Speak
+                            </button>
+                            <button type="button" class="chatbot-btn chatbot-btn-primary" onclick="sendChatToCaregiver()">
+                                Send to Caregiver
+                            </button>
+                        </div>
+                        <div id="chatbot-status" class="chatbot-status" aria-live="polite"></div>
+                    </div>
+                </div>
             </main>
 
         </div>
