@@ -18,6 +18,19 @@ public class GroqAIService {
     
     @Value("${groq.api.key}")
     private String apiKey;
+
+    private String resolvedApiKey() {
+        String s = apiKey == null ? "" : apiKey.trim();
+        if (s.length() >= 2
+                && ((s.charAt(0) == '"' && s.charAt(s.length() - 1) == '"')
+                || (s.charAt(0) == '\'' && s.charAt(s.length() - 1) == '\''))) {
+            s = s.substring(1, s.length() - 1).trim();
+        }
+        if (s.length() >= 7 && s.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            s = s.substring(7).trim();
+        }
+        return s.replace("\r", "").replace("\n", "").replace("\t", "");
+    }
     
     @Value("${groq.api.url}")
     private String apiUrl;
@@ -30,6 +43,10 @@ public class GroqAIService {
     
     public String generateWellnessInsight(Map<String, Object> userData) {
         try {
+            String key = resolvedApiKey();
+            if (key.isBlank()) {
+                return "Start logging your wellness data to receive personalized AI insights!";
+            }
             // Build prompt based on user data
             String prompt = buildPrompt(userData);
             
@@ -55,7 +72,7 @@ public class GroqAIService {
             // Make API request
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(apiUrl))
-                .header("Authorization", "Bearer " + apiKey)
+                .header("Authorization", "Bearer " + key)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(requestBody)))
                 .build();

@@ -4,9 +4,41 @@ let authToken = localStorage.getItem('authToken');
 
 // Chatbot helpers reused from dashboard.js (simple wrapper for /app)
 let chatbotRecognition = null;
+let chatAutoSendTimer = null;
+const CHAT_AUTO_SEND_MS = 10000;
+
+function clearChatAutoSend() {
+    if (chatAutoSendTimer) {
+        clearTimeout(chatAutoSendTimer);
+        chatAutoSendTimer = null;
+    }
+}
+
+function scheduleChatAutoSend() {
+    clearChatAutoSend();
+    const textInput = document.getElementById('chatbot-text-input');
+    if (!textInput || !textInput.value.trim()) return;
+    chatAutoSendTimer = setTimeout(() => {
+        chatAutoSendTimer = null;
+        const el = document.getElementById('chatbot-text-input');
+        if (el && el.value.trim()) sendChatToCaregiver(null, { autoSend: true });
+    }, CHAT_AUTO_SEND_MS);
+}
 
 function toggleChatbot() {
+    const overlay = document.getElementById('chatbot-overlay');
     const widget = document.getElementById('chatbot-widget');
+    if (overlay && widget) {
+        overlay.classList.toggle('is-open');
+        const open = overlay.classList.contains('is-open');
+        overlay.setAttribute('aria-hidden', open ? 'false' : 'true');
+        document.body.style.overflow = open ? 'hidden' : '';
+        if (open) {
+            const input = document.getElementById('chatbot-text-input');
+            setTimeout(() => input?.focus(), 100);
+        }
+        return;
+    }
     if (!widget) return;
     const isOpen = widget.style.display === 'flex';
     widget.style.display = isOpen ? 'none' : 'flex';
@@ -17,9 +49,16 @@ function setChatbotStatus(text) {
     if (el) el.textContent = text || '';
 }
 
+function hideChatEmptyState() {
+    const empty = document.getElementById('chatbot-empty-state');
+    if (empty) empty.hidden = true;
+}
+
 function appendChatBubble({ text, from }) {
     const container = document.getElementById('chatbot-messages');
     if (!container) return;
+
+    hideChatEmptyState();
 
     const bubble = document.createElement('div');
     bubble.className = `chat-bubble ${from === 'me' ? 'me' : 'caregiver'}`;
@@ -37,9 +76,10 @@ function initChatbot() {
     textInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            sendChatToCaregiver();
+            sendChatToCaregiver(null, { autoSend: false });
         }
     });
+    textInput.addEventListener('input', () => scheduleChatAutoSend());
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -79,8 +119,9 @@ function initChatbot() {
         const finalText = transcript.trim();
         if (!finalText) return;
 
+        clearChatAutoSend();
         appendChatBubble({ text: finalText, from: 'me' });
-        await sendChatToCaregiver(finalText);
+        await sendChatToCaregiver(finalText, { autoSend: false });
     };
 }
 
@@ -97,10 +138,12 @@ function startVoiceInput() {
     }
 }
 
-async function sendChatToCaregiver(forceText = null) {
+async function sendChatToCaregiver(forceText = null, opts = {}) {
+    const autoSend = opts.autoSend === true;
+    clearChatAutoSend();
     const textInputEl = document.getElementById('chatbot-text-input');
     const statusEl = document.getElementById('chatbot-status');
-    const sendBtn = document.querySelector('.chatbot-btn-primary');
+    const sendBtn = document.querySelector('#chatbot-widget .chatbot-btn-primary');
     if (!textInputEl) return;
 
     const text = (forceText != null ? forceText : textInputEl.value).trim();
@@ -109,7 +152,7 @@ async function sendChatToCaregiver(forceText = null) {
         return;
     }
 
-    setChatbotStatus('Sending to caregiver...');
+    setChatbotStatus(autoSend ? 'Sending (auto)… translating for your caregiver.' : 'Sending… translating for your caregiver.');
     if (sendBtn) sendBtn.disabled = true;
 
     try {
@@ -135,12 +178,17 @@ async function sendChatToCaregiver(forceText = null) {
         if (!forceText) appendChatBubble({ text, from: 'me' });
 
         appendChatBubble({
-            text: translated ? `Translated: ${translated}` : 'Sent to caregiver.',
+            text: translated
+                ? `✓ Delivered to caregiver (notification)\n${translated}`
+                : '✓ Delivered to caregiver as a notification.',
             from: 'caregiver'
         });
 
-        textInputEl.value = '';
-        setChatbotStatus('Sent!');
+        // Keep typed text after idle auto-send so it is not wiped; clear after manual send or voice.
+        if (forceText != null || !autoSend) {
+            textInputEl.value = '';
+        }
+        setChatbotStatus(autoSend ? 'Sent — your message stays below so you can edit or send again.' : 'Sent!');
     } catch (e) {
         console.error('sendChatToCaregiver error:', e);
         setChatbotStatus('Network error. Please try again.');
@@ -390,6 +438,13 @@ function logout() {
         ringModal.remove();
     }
     
+    document.body.style.overflow = '';
+    const chatOverlay = document.getElementById('chatbot-overlay');
+    if (chatOverlay) {
+        chatOverlay.classList.remove('is-open');
+        chatOverlay.setAttribute('aria-hidden', 'true');
+    }
+
     document.getElementById('dashboard-screen').classList.remove('active');
     document.getElementById('auth-screen').classList.add('active');
 }
@@ -403,9 +458,13 @@ function showDashboard() {
 
     // Show chatbot only on the dashboard view (elderly portal).
     const fab = document.getElementById('chatbot-fab');
-    const widget = document.getElementById('chatbot-widget');
+    const overlay = document.getElementById('chatbot-overlay');
     if (fab) fab.style.display = 'flex';
-    if (widget) widget.style.display = 'none';
+    if (overlay) {
+        overlay.classList.remove('is-open');
+        overlay.setAttribute('aria-hidden', 'true');
+    }
+    document.body.style.overflow = '';
 }
 
 function switchView(viewName) {
@@ -417,10 +476,14 @@ function switchView(viewName) {
 
     // Chatbot visibility is strictly "dashboard only".
     const fab = document.getElementById('chatbot-fab');
-    const widget = document.getElementById('chatbot-widget');
+    const overlay = document.getElementById('chatbot-overlay');
     const showChatbot = viewName === 'dashboard';
     if (fab) fab.style.display = showChatbot ? 'flex' : 'none';
-    if (widget && !showChatbot) widget.style.display = 'none';
+    if (overlay && !showChatbot) {
+        overlay.classList.remove('is-open');
+        overlay.setAttribute('aria-hidden', 'true');
+        document.body.style.overflow = '';
+    }
     
     // Load data for specific views
     if (viewName === 'dashboard') loadDashboardData();

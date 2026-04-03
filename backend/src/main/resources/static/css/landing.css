@@ -6,9 +6,18 @@
 
 body {
     font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
-    background: linear-gradient(135deg, #f5f7fa 0%, #e8eef5 100%);
+    background: #f8fafc;
+    background-image:
+        linear-gradient(135deg, rgba(248, 250, 252, 0.95) 0%, rgba(241, 245, 249, 0.92) 100%),
+        radial-gradient(circle at 10% 10%, rgba(59, 130, 246, 0.16), transparent 45%),
+        radial-gradient(circle at 86% 18%, rgba(16, 185, 129, 0.12), transparent 52%),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='none' stroke='%233b82f6' stroke-opacity='0.08' stroke-width='2'%3E%3Cpath d='M60 15v90'/%3E%3Cpath d='M15 60h90'/%3E%3Cpath d='M28 28l64 64'/%3E%3Cpath d='M92 28l-64 64'/%3E%3Crect x='34' y='56' width='52' height='8' rx='4'/%3E%3C/g%3E%3C/svg%3E"),
+        url('/images/medical-bg.svg');
+    background-size: cover, auto, auto, 180px 180px, cover;
+    background-repeat: no-repeat, no-repeat, no-repeat, repeat, no-repeat;
     overflow-x: hidden;
     min-height: 100vh;
+    position: relative;
 }
 
 /* Top Navigation */
@@ -448,5 +457,45 @@ body {
     .features-preview {
         grid-template-columns: 1fr;
         padding: 40px 24px;
+    }
+}
+
+@media (max-width: 480px) {
+    .top-nav {
+        padding: 16px 16px;
+    }
+
+    .brand-name {
+        font-size: 40px;
+    }
+
+    .shape-3d {
+        width: 260px;
+        height: 260px;
+    }
+
+    .pill-shape {
+        width: 200px;
+        height: 200px;
+    }
+
+    .tagline-section {
+        margin-top: 28px;
+        padding: 0 16px;
+    }
+
+    .tagline-title {
+        font-size: 20px;
+    }
+
+    .btn-start-now {
+        width: 92px;
+        height: 92px;
+        bottom: 70px;
+        right: 16px;
+    }
+
+    .btn-start-now .btn-text {
+        font-size: 14px;
     }
 }

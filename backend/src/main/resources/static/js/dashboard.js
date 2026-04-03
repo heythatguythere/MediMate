@@ -115,9 +115,41 @@ async function loadDashboard() {
 
 // ========== CHATBOT (ELDERLY -> CAREGIVER VOICE TRANSLATION) ==========
 let chatbotRecognition = null;
+let chatAutoSendTimer = null;
+const CHAT_AUTO_SEND_MS = 10000;
+
+function clearChatAutoSend() {
+    if (chatAutoSendTimer) {
+        clearTimeout(chatAutoSendTimer);
+        chatAutoSendTimer = null;
+    }
+}
+
+function scheduleChatAutoSend() {
+    clearChatAutoSend();
+    const textInput = document.getElementById('chatbot-text-input');
+    if (!textInput || !textInput.value.trim()) return;
+    chatAutoSendTimer = setTimeout(() => {
+        chatAutoSendTimer = null;
+        const el = document.getElementById('chatbot-text-input');
+        if (el && el.value.trim()) sendChatToCaregiver(null, { autoSend: true });
+    }, CHAT_AUTO_SEND_MS);
+}
 
 function toggleChatbot() {
+    const overlay = document.getElementById('chatbot-overlay');
     const widget = document.getElementById('chatbot-widget');
+    if (overlay && widget) {
+        overlay.classList.toggle('is-open');
+        const open = overlay.classList.contains('is-open');
+        overlay.setAttribute('aria-hidden', open ? 'false' : 'true');
+        document.body.style.overflow = open ? 'hidden' : '';
+        if (open) {
+            const input = document.getElementById('chatbot-text-input');
+            setTimeout(() => input?.focus(), 100);
+        }
+        return;
+    }
     if (!widget) return;
     const isOpen = widget.style.display === 'flex';
     widget.style.display = isOpen ? 'none' : 'flex';
@@ -128,9 +160,16 @@ function setChatbotStatus(text) {
     if (el) el.textContent = text || '';
 }
 
+function hideChatEmptyState() {
+    const empty = document.getElementById('chatbot-empty-state');
+    if (empty) empty.hidden = true;
+}
+
 function appendChatBubble({ text, from }) {
     const container = document.getElementById('chatbot-messages');
     if (!container) return;
+
+    hideChatEmptyState();
 
     const bubble = document.createElement('div');
     bubble.className = `chat-bubble ${from === 'me' ? 'me' : 'caregiver'}`;
@@ -149,9 +188,10 @@ function initChatbot() {
             // Enter to send (Shift+Enter for new line).
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                sendChatToCaregiver();
+                sendChatToCaregiver(null, { autoSend: false });
             }
         });
+        textInput.addEventListener('input', () => scheduleChatAutoSend());
     }
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -197,8 +237,9 @@ function initChatbot() {
         const finalText = transcript.trim();
         if (!finalText) return;
 
+        clearChatAutoSend();
         appendChatBubble({ text: finalText, from: 'me' });
-        await sendChatToCaregiver(finalText);
+        await sendChatToCaregiver(finalText, { autoSend: false });
     };
 }
 
@@ -216,10 +257,12 @@ function startVoiceInput() {
     }
 }
 
-async function sendChatToCaregiver(forceText = null) {
+async function sendChatToCaregiver(forceText = null, opts = {}) {
+    const autoSend = opts.autoSend === true;
+    clearChatAutoSend();
     const textInputEl = document.getElementById('chatbot-text-input');
     const statusEl = document.getElementById('chatbot-status');
-    const sendBtn = document.querySelector('.chatbot-btn-primary');
+    const sendBtn = document.querySelector('#chatbot-widget .chatbot-btn-primary');
     if (!textInputEl) return;
 
     const text = (forceText != null ? forceText : textInputEl.value).trim();
@@ -228,7 +271,7 @@ async function sendChatToCaregiver(forceText = null) {
         return;
     }
 
-    setChatbotStatus('Sending to caregiver...');
+    setChatbotStatus(autoSend ? 'Sending (auto)… translating for your caregiver.' : 'Sending… translating for your caregiver.');
     if (sendBtn) sendBtn.disabled = true;
 
     try {
@@ -255,13 +298,16 @@ async function sendChatToCaregiver(forceText = null) {
         if (!forceText) appendChatBubble({ text, from: 'me' });
 
         appendChatBubble({
-            text: translated ? `Translated: ${translated}` : 'Sent to caregiver.',
+            text: translated
+                ? `✓ Delivered to caregiver (notification)\n${translated}`
+                : '✓ Delivered to caregiver as a notification.',
             from: 'caregiver'
         });
 
-        // Clear composer for the next message.
-        textInputEl.value = '';
-        setChatbotStatus('Sent!');
+        if (forceText != null || !autoSend) {
+            textInputEl.value = '';
+        }
+        setChatbotStatus(autoSend ? 'Sent — your message stays below so you can edit or send again.' : 'Sent!');
     } catch (e) {
         console.error('sendChatToCaregiver error:', e);
         setChatbotStatus('Network error. Please try again.');

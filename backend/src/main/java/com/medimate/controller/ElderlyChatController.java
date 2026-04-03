@@ -16,6 +16,9 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +27,7 @@ import java.util.Map;
 @RequestMapping("/api/elderly/chat")
 @CrossOrigin(origins = "*")
 public class ElderlyChatController {
+    private static final Logger log = LoggerFactory.getLogger(ElderlyChatController.class);
     private final TokenService tokenService;
     private final UserRepository userRepository;
     private final PatientRepository patientRepository;
@@ -94,7 +98,9 @@ public class ElderlyChatController {
                     "translated", translated
             ));
         } catch (Exception e) {
-            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
+            log.error("translateToCaregiver failed", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "error", "Translation is temporarily unavailable. Please try again."));
         }
     }
 }

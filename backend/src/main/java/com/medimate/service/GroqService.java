@@ -20,8 +20,25 @@ public class GroqService {
 
     private static final String GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
+    /**
+     * Env values often include newlines or a duplicated "Bearer " prefix; both break HTTP headers.
+     */
+    private String resolvedApiKey() {
+        String s = groqApiKey == null ? "" : groqApiKey.trim();
+        if (s.length() >= 2
+                && ((s.charAt(0) == '"' && s.charAt(s.length() - 1) == '"')
+                || (s.charAt(0) == '\'' && s.charAt(s.length() - 1) == '\''))) {
+            s = s.substring(1, s.length() - 1).trim();
+        }
+        if (s.length() >= 7 && s.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            s = s.substring(7).trim();
+        }
+        return s.replace("\r", "").replace("\n", "").replace("\t", "");
+    }
+
     public String generateInsights(String context) throws Exception {
-        if (groqApiKey == null || groqApiKey.isBlank()) {
+        String key = resolvedApiKey();
+        if (key.isBlank()) {
             throw new IllegalStateException("GROQ_API_KEY not configured");
         }
         String payload = "{" +
@@ -32,7 +49,7 @@ public class GroqService {
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(GROQ_URL))
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + groqApiKey)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + key)
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .POST(HttpRequest.BodyPublishers.ofString(payload))
                 .build();
@@ -61,7 +78,8 @@ public class GroqService {
      * IMPORTANT: Returns only the translated text (no extra commentary).
      */
     public String translateMessage(String text, String targetLanguage) throws Exception {
-        if (groqApiKey == null || groqApiKey.isBlank()) {
+        String key = resolvedApiKey();
+        if (key.isBlank()) {
             throw new IllegalStateException("GROQ_API_KEY not configured");
         }
         String lang = (targetLanguage == null || targetLanguage.isBlank()) ? "English" : targetLanguage.trim();
@@ -75,7 +93,7 @@ public class GroqService {
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(GROQ_URL))
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + groqApiKey)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + key)
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .POST(HttpRequest.BodyPublishers.ofString(payload))
                 .build();

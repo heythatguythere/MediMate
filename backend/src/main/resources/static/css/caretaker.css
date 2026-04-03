@@ -83,10 +83,13 @@ body {
     font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
     background: var(--bg);
     background-image:
-        radial-gradient(circle at 20% 0%, rgba(59,130,246,0.18), transparent 45%),
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'%3E%3Cg fill='none' stroke='%233b82f6' stroke-opacity='0.08' stroke-width='2'%3E%3Cpath d='M40 10v60'/%3E%3Cpath d='M10 40h60'/%3E%3C/g%3E%3C/svg%3E");
-    background-size: auto, 160px 160px;
-    background-repeat: no-repeat, repeat;
+        linear-gradient(135deg, rgba(2, 6, 23, 0.78) 0%, rgba(15, 23, 42, 0.62) 100%),
+        radial-gradient(circle at 20% 0%, rgba(59, 130, 246, 0.20), transparent 45%),
+        radial-gradient(circle at 85% 18%, rgba(16, 185, 129, 0.16), transparent 52%),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='none' stroke='%233b82f6' stroke-opacity='0.08' stroke-width='2'%3E%3Cpath d='M60 15v90'/%3E%3Cpath d='M15 60h90'/%3E%3Cpath d='M28 28l64 64'/%3E%3Cpath d='M92 28l-64 64'/%3E%3Crect x='34' y='56' width='52' height='8' rx='4'/%3E%3C/g%3E%3C/svg%3E"),
+        url('/images/medical-bg.svg');
+    background-size: cover, auto, auto, 160px 160px, cover;
+    background-repeat: no-repeat, no-repeat, no-repeat, repeat, no-repeat;
     color: var(--text);
     transition: all 0.3s ease;
     position: relative;
@@ -100,7 +103,7 @@ body::after {
     pointer-events: none;
     z-index: 0;
     filter: blur(60px);
-    opacity: 0.35;
+    opacity: 0.24;
 }
 
 body::before {
@@ -108,7 +111,7 @@ body::before {
     height: 520px;
     top: -260px;
     left: -260px;
-    background: radial-gradient(circle, rgba(59, 130, 246, 0.45) 0%, rgba(59, 130, 246, 0) 62%);
+    background: radial-gradient(circle, rgba(59, 130, 246, 0.32) 0%, rgba(59, 130, 246, 0) 62%);
 }
 
 body::after {
@@ -116,12 +119,12 @@ body::after {
     height: 520px;
     bottom: -270px;
     right: -270px;
-    background: radial-gradient(circle, rgba(16, 185, 129, 0.42) 0%, rgba(16, 185, 129, 0) 62%);
+    background: radial-gradient(circle, rgba(16, 185, 129, 0.32) 0%, rgba(16, 185, 129, 0) 62%);
 }
 
 body.dark-mode::before,
 body.dark-mode::after {
-    opacity: 0.22;
+    opacity: 0.18;
 }
 
 /* Top Navbar */
