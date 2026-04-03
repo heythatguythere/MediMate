@@ -605,3 +605,49 @@ body.dark-mode::after { opacity: 0.22; }
         grid-template-columns: 1fr;
     }
 }
+
+@media (max-width: 768px) {
+    .top-nav {
+        padding: 16px 16px;
+    }
+
+    .main-content {
+        padding: 16px;
+    }
+
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .charts-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 480px) {
+    .auth-container {
+        padding: 14px;
+    }
+
+    .auth-card {
+        padding: 24px;
+        max-width: 420px;
+    }
+
+    .auth-header h1 {
+        font-size: 32px;
+    }
+
+    .tab-btn {
+        font-size: 14px;
+        padding: 12px;
+    }
+
+    .main-content {
+        padding: 12px;
+    }
+
+    .card {
+        padding: 16px;
+    }
+}

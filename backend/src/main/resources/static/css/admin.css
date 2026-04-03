@@ -886,4 +886,49 @@ body {
     .stats-grid {
         grid-template-columns: 1fr;
     }
+
+    .header-right {
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+
+    .search-box input {
+        width: 100%;
+        max-width: 340px;
+    }
+}
+
+@media (max-width: 480px) {
+    .admin-modal-overlay {
+        align-items: flex-end;
+        padding: 10px;
+    }
+
+    .admin-modal {
+        width: 94vw;
+        padding: 12px;
+    }
+
+    .admin-modal-header h2 {
+        font-size: 16px;
+    }
+
+    .admin-modal-body input,
+    .admin-modal-body select,
+    .admin-modal-body textarea {
+        padding: 8px 10px;
+        border-radius: 10px;
+    }
+
+    .admin-modal-footer {
+        gap: 8px;
+    }
+
+    .header-right {
+        gap: 8px;
+    }
+
+    .search-box input {
+        max-width: none;
+    }
 }

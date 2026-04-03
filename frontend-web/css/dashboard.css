@@ -677,6 +677,19 @@ body::after {
         margin-left: 200px;
         padding: 20px;
     }
+
+    /* Keep chatbot usable on tablets */
+    .chatbot-fab {
+        right: 12px;
+        bottom: 12px;
+    }
+
+    .chatbot-widget {
+        right: 12px;
+        left: 12px;
+        width: auto;
+        bottom: 72px;
+    }
     
     .stats-grid {
         grid-template-columns: repeat(2, 1fr);
@@ -699,6 +712,31 @@ body::after {
     
     .nav-item span:last-child {
         display: none;
+    }
+
+    /* Keep chatbot on screen on small phones */
+    .chatbot-fab {
+        right: 12px;
+        bottom: 12px;
+        width: 50px;
+        height: 50px;
+        border-radius: 16px;
+    }
+
+    .chatbot-widget {
+        right: 10px;
+        left: 10px;
+        width: auto;
+        bottom: 68px;
+        max-height: 62vh;
+    }
+
+    .chatbot-header {
+        padding: 12px 14px;
+    }
+
+    .chatbot-messages {
+        padding: 12px 14px;
     }
     
     .stats-grid {
