@@ -38,7 +38,7 @@ A comprehensive health management platform for elderly patients and their caregi
 - **JavaFX** (Desktop App - Optional)
 - Modern, responsive UI with Tailwind-inspired styling
 
-## Quick Start
+## Quick Start - to start it off
 
 ### Prerequisites
 - Java 17 or higher
